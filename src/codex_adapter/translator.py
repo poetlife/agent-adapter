@@ -153,8 +153,16 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     multi-turn tool-call conversations.
 
     Role mapping: 'developer' → 'system' (DeepSeek doesn't support 'developer').
+
+    DeepSeek thinking mode requires reasoning_content to be passed back in the
+    assistant message. When a 'reasoning' item precedes a 'function_call' item,
+    we merge them into a single assistant message with both reasoning_content
+    and tool_calls.
     """
     messages: list[dict[str, Any]] = []
+    # Buffer reasoning_content from 'reasoning' items to attach to the next
+    # assistant message (function_call or regular message).
+    pending_reasoning: str | None = None
 
     for item in items:
         item_type = item.get("type", "")
@@ -164,29 +172,28 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if role == "developer":
             role = "system"
 
-        if item_type == "message" or "content" in item:
-            # Standard message item
-            content = item.get("content", "")
-            if isinstance(content, list):
-                content = _convert_content_parts(content)
-            msg: dict[str, Any] = {"role": role, "content": content}
-            # Preserve reasoning_content for multi-turn context (DeepSeek requirement)
-            if "reasoning_content" in item:
-                msg["reasoning_content"] = item["reasoning_content"]
-            messages.append(msg)
-
-        elif item_type == "reasoning":
-            # Codex may send reasoning output back as input for context
-            # Map to assistant message with reasoning_content for DeepSeek
-            messages.append({
-                "role": "assistant",
-                "content": "",
-                "reasoning_content": item.get("text", item.get("content", "")),
-            })
+        if item_type == "reasoning":
+            # Buffer reasoning text — it will be attached to the next
+            # assistant message (function_call or text message).
+            text = ""
+            # reasoning items may have summary list or direct text
+            summary = item.get("summary", [])
+            if isinstance(summary, list):
+                for s in summary:
+                    if isinstance(s, dict):
+                        text += s.get("text", "")
+                    elif isinstance(s, str):
+                        text += s
+            if not text:
+                text = item.get("text", item.get("content", ""))
+            if pending_reasoning:
+                pending_reasoning += text
+            else:
+                pending_reasoning = text
 
         elif item_type == "function_call":
             # Tool call from previous turn (assistant message with tool_calls)
-            msg = {
+            msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [{
@@ -198,8 +205,11 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     },
                 }],
             }
-            # Preserve reasoning_content for tool-call context chains
-            if "reasoning_content" in item:
+            # Attach buffered reasoning_content (DeepSeek requirement)
+            if pending_reasoning:
+                msg["reasoning_content"] = pending_reasoning
+                pending_reasoning = None
+            elif "reasoning_content" in item:
                 msg["reasoning_content"] = item["reasoning_content"]
             messages.append(msg)
 
@@ -211,11 +221,34 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "content": item.get("output", ""),
             })
 
+        elif item_type == "message" or "content" in item:
+            # Standard message item
+            content = item.get("content", "")
+            if isinstance(content, list):
+                content = _convert_content_parts(content)
+            msg = {"role": role, "content": content}
+            # Attach buffered reasoning to assistant messages
+            if role == "assistant" and pending_reasoning:
+                msg["reasoning_content"] = pending_reasoning
+                pending_reasoning = None
+            elif "reasoning_content" in item:
+                msg["reasoning_content"] = item["reasoning_content"]
+            messages.append(msg)
+
         else:
             # Fallback: treat as a user message if it has text content
             text = item.get("text", item.get("content", ""))
             if text:
                 messages.append({"role": role, "content": text})
+
+    # If there's leftover buffered reasoning with no following assistant message,
+    # emit it as a standalone assistant message
+    if pending_reasoning:
+        messages.append({
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": pending_reasoning,
+        })
 
     return messages
 

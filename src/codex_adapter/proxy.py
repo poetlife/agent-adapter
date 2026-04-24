@@ -144,7 +144,7 @@ def create_app(preset: Preset) -> Starlette:
                             }
                         }
                         yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
-                        # Codex CLI expects every stream to end with response.completed + done
+                        # Codex CLI expects response.failed with proper wrapping
                         import time as _time
                         import uuid as _uuid
                         failed_resp = {
@@ -155,11 +155,13 @@ def create_app(preset: Preset) -> Starlette:
                             "output": [],
                             "output_text": "",
                             "status": "failed",
-                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                            "error": error_event["error"],
+                            "error": {
+                                "code": str(resp.status_code),
+                                "message": error_msg,
+                            },
+                            "usage": None,
                         }
-                        yield f"event: response.completed\ndata: {json.dumps(failed_resp)}\n\n".encode()
-                        yield b"event: done\ndata: [DONE]\n\n"
+                        yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': failed_resp})}\n\n".encode()
                         return
 
                     async for chunk in translate_stream(resp.aiter_lines(), original_model):
