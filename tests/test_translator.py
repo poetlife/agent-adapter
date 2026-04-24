@@ -483,6 +483,66 @@ class TestMultiTurnReasoningContent:
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0]["reasoning_content"] == "thinking..."
 
+    def test_tool_continuation_reuses_previous_reasoning_when_missing(self):
+        """Assistant continuation after tool output should inherit prior reasoning in thinking mode."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Wait for the command"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need to wait longer"}]},
+                {"type": "function_call", "call_id": "call_001", "name": "write_stdin", "arguments": '{"session_id":1,"yield_time_ms":30000}'},
+                {"type": "function_call_output", "call_id": "call_001", "output": "still running"},
+                {"type": "function_call", "call_id": "call_002", "name": "write_stdin", "arguments": '{"session_id":1,"yield_time_ms":60000}'},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 2
+        assert assistant_msgs[0]["reasoning_content"] == "Need to wait longer"
+        assert assistant_msgs[1]["reasoning_content"] == "Need to wait longer"
+
+    def test_reasoning_not_reused_across_user_turn(self):
+        """Previous assistant reasoning should not leak into a fresh user-triggered turn."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "First task"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "old reasoning"}]},
+                {"type": "message", "role": "assistant", "content": "Done"},
+                {"type": "message", "role": "user", "content": "New task"},
+                {"type": "message", "role": "assistant", "content": "Fresh answer"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 2
+        assert assistant_msgs[0]["reasoning_content"] == "old reasoning"
+        assert "reasoning_content" not in assistant_msgs[1]
+
+    def test_tool_continuation_does_not_reuse_reasoning_when_thinking_disabled(self):
+        """Reasoning carry-forward should only happen when this request actually uses thinking."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Wait"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "old reasoning"}]},
+                {"type": "function_call", "call_id": "call_001", "name": "write_stdin", "arguments": '{"session_id":1,"yield_time_ms":30000}'},
+                {"type": "function_call_output", "call_id": "call_001", "output": "still running"},
+                {"type": "function_call", "call_id": "call_002", "name": "write_stdin", "arguments": '{"session_id":1,"yield_time_ms":60000}'},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="disabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert result["thinking"]["type"] == "disabled"
+        assert assistant_msgs[0]["reasoning_content"] == "old reasoning"
+        assert "reasoning_content" not in assistant_msgs[1]
+
 
 class TestConsecutiveAssistantMerge:
     """Test merging of consecutive assistant messages (parallel tool calls)."""

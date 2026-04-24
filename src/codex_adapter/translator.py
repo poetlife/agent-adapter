@@ -71,23 +71,6 @@ def responses_request_to_chat(
     if instructions:
         messages.append({"role": "system", "content": instructions})
 
-    # Convert 'input' to messages
-    raw_input = body.get("input", "")
-    if isinstance(raw_input, str):
-        if raw_input:
-            messages.append({"role": "user", "content": raw_input})
-    elif isinstance(raw_input, list):
-        messages.extend(_convert_input_items(raw_input))
-
-    chat_body: dict[str, Any] = {
-        "model": body.get("model", ""),
-        "messages": messages,
-    }
-
-    # max_output_tokens → max_tokens
-    if "max_output_tokens" in body:
-        chat_body["max_tokens"] = body["max_output_tokens"]
-
     # --- Thinking mode translation ---
     thinking_enabled = False
     ds_reasoning_effort = model_config.reasoning_effort
@@ -109,6 +92,23 @@ def responses_request_to_chat(
     elif model_config.supports_thinking and model_config.default_thinking == "enabled":
         # Use model preset defaults if no explicit reasoning param
         thinking_enabled = True
+
+    # Convert 'input' to messages
+    raw_input = body.get("input", "")
+    if isinstance(raw_input, str):
+        if raw_input:
+            messages.append({"role": "user", "content": raw_input})
+    elif isinstance(raw_input, list):
+        messages.extend(_convert_input_items(raw_input, thinking_enabled=thinking_enabled))
+
+    chat_body: dict[str, Any] = {
+        "model": body.get("model", ""),
+        "messages": messages,
+    }
+
+    # max_output_tokens → max_tokens
+    if "max_output_tokens" in body:
+        chat_body["max_tokens"] = body["max_output_tokens"]
 
     if model_config.supports_thinking:
         if thinking_enabled:
@@ -150,7 +150,11 @@ def responses_request_to_chat(
     return chat_body
 
 
-def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _convert_input_items(
+    items: list[dict[str, Any]],
+    *,
+    thinking_enabled: bool = False,
+) -> list[dict[str, Any]]:
     """Convert Responses API input items to Chat Completions messages.
 
     Also handles reasoning_content from previous assistant turns for DeepSeek
@@ -162,11 +166,18 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     assistant message. When a 'reasoning' item precedes a 'function_call' item,
     we merge them into a single assistant message with both reasoning_content
     and tool_calls.
+
+    Some clients do not emit a fresh 'reasoning' item for every assistant
+    continuation after tool outputs. In thinking mode we carry forward the most
+    recent assistant reasoning_content across an immediate tool-result
+    continuation so DeepSeek still receives the required field.
     """
     messages: list[dict[str, Any]] = []
     # Buffer reasoning_content from 'reasoning' items to attach to the next
     # assistant message (function_call or regular message).
     pending_reasoning: str | None = None
+    last_assistant_reasoning: str | None = None
+    last_item_was_tool_output = False
 
     for item in items:
         item_type = item.get("type", "")
@@ -194,6 +205,7 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 pending_reasoning += text
             else:
                 pending_reasoning = text
+            last_item_was_tool_output = False
 
         elif item_type == "function_call":
             # Tool call from previous turn (assistant message with tool_calls)
@@ -209,13 +221,20 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     },
                 }],
             }
-            # Attach buffered reasoning_content (DeepSeek requirement)
+            # Attach buffered reasoning_content (DeepSeek requirement).
+            # If the client omitted a fresh reasoning item for an immediate
+            # post-tool continuation, reuse the previous assistant reasoning.
             if pending_reasoning:
                 msg["reasoning_content"] = pending_reasoning
                 pending_reasoning = None
             elif "reasoning_content" in item:
                 msg["reasoning_content"] = item["reasoning_content"]
+            elif thinking_enabled and last_item_was_tool_output and last_assistant_reasoning:
+                msg["reasoning_content"] = last_assistant_reasoning
+            if msg.get("reasoning_content"):
+                last_assistant_reasoning = msg["reasoning_content"]
             messages.append(msg)
+            last_item_was_tool_output = False
 
         elif item_type == "function_call_output":
             # Tool result
@@ -224,6 +243,7 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "tool_call_id": item.get("call_id", ""),
                 "content": item.get("output", ""),
             })
+            last_item_was_tool_output = True
 
         elif item_type == "message" or "content" in item:
             # Standard message item
@@ -231,28 +251,36 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if isinstance(content, list):
                 content = _convert_content_parts(content)
             msg = {"role": role, "content": content}
-            # Attach buffered reasoning to assistant messages
+            # Attach buffered reasoning to assistant messages.
             if role == "assistant" and pending_reasoning:
                 msg["reasoning_content"] = pending_reasoning
                 pending_reasoning = None
             elif "reasoning_content" in item:
                 msg["reasoning_content"] = item["reasoning_content"]
+            elif role == "assistant" and thinking_enabled and last_item_was_tool_output and last_assistant_reasoning:
+                msg["reasoning_content"] = last_assistant_reasoning
+            if role == "assistant" and msg.get("reasoning_content"):
+                last_assistant_reasoning = msg["reasoning_content"]
             messages.append(msg)
+            last_item_was_tool_output = False
 
         else:
             # Fallback: treat as a user message if it has text content
             text = item.get("text", item.get("content", ""))
             if text:
                 messages.append({"role": role, "content": text})
+            last_item_was_tool_output = False
 
     # If there's leftover buffered reasoning with no following assistant message,
     # emit it as a standalone assistant message
     if pending_reasoning:
-        messages.append({
+        trailing_msg = {
             "role": "assistant",
             "content": "",
             "reasoning_content": pending_reasoning,
-        })
+        }
+        messages.append(trailing_msg)
+        last_assistant_reasoning = trailing_msg["reasoning_content"]
 
     # Merge consecutive assistant messages.
     # Codex CLI emits each function_call as a separate item, but the Chat
