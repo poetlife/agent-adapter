@@ -38,6 +38,12 @@ class TestPreset:
         assert preset.models[0].max_tokens == 4096
         assert preset.models[1].max_tokens == 8192  # default
 
+    def test_resolve_model_with_match_and_fallback(self):
+        preset = Preset.from_dict(SAMPLE_PRESET_DATA)
+        assert preset.resolve_model("test-model-2").litellm_model == "test/model-2"
+        assert preset.resolve_model("unknown-model").litellm_model == "test/model-1"
+        assert preset.resolve_model(None).litellm_model == "test/model-1"
+
     def test_from_yaml(self, tmp_path: Path):
         import yaml
 
@@ -61,7 +67,7 @@ class TestPreset:
             "env_key": "DEEPSEEK_API_KEY",
             "models": [{
                 "name": "deepseek-v4-flash",
-                "litellm_model": "deepseek-v4-flash",
+                "litellm_model": "deepseek/deepseek-v4-flash",
                 "api_base": "https://api.deepseek.com",
                 "supports_thinking": True,
                 "default_thinking": "enabled",
@@ -89,7 +95,7 @@ class TestPreset:
             "api_base": "https://api.deepseek.com",
             "models": [{
                 "name": "deepseek-v4-flash",
-                "litellm_model": "deepseek-v4-flash",
+                "litellm_model": "deepseek/deepseek-v4-flash",
             }],
         }
         preset = Preset.from_dict(data)

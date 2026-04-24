@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.resources
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +33,18 @@ class Preset:
     models: list[ModelEntry]
     env_key: str
     description: str = ""
+
+    def resolve_model(self, name: str | None = None) -> ModelEntry | None:
+        """Resolve a public model name to a preset model entry.
+
+        Falls back to the first configured model when ``name`` is empty or
+        unknown so the CLI keeps a sensible default behavior.
+        """
+        if name:
+            for model in self.models:
+                if model.name == name:
+                    return model
+        return self.models[0] if self.models else None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Preset:

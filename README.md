@@ -4,17 +4,17 @@
 
 最新版 Codex CLI 使用 OpenAI 的 **Responses API** (`/v1/responses`)，而 DeepSeek 等第三方模型只支持 **Chat Completions API** (`/v1/chat/completions`)。
 
-本项目在本地启动一个轻量代理服务器，**自动完成两种协议之间的双向翻译**，对 Codex CLI 完全透明——无需配置 `wire_api`，无需改动 Codex CLI 本身。
+本项目在本地启动一个轻量代理服务器，**自动完成两种协议之间的双向翻译**，并通过 `LiteLLM` SDK 统一接入下游模型，对 Codex CLI 完全透明——无需配置 `wire_api`，无需改动 Codex CLI 本身。
 
 ## 架构
 
 ```
-Codex CLI                    Codex Adapter Proxy              DeepSeek API
-──────────                   ───────────────────              ────────────
+Codex CLI                    Codex Adapter Proxy                 LiteLLM SDK / Provider API
+──────────                   ───────────────────                 ──────────────────────────
 POST /v1/responses    →      接收 Responses API 请求
 (Responses API 格式)          ↓ 翻译请求格式
-                             POST /v1/chat/completions  →    处理请求
-                             ↓ 翻译响应格式               ←  返回结果
+                             调用 LiteLLM chat completion  →     处理请求
+                             ↓ 翻译响应格式                  ←    返回结果
                       ←      返回 Responses API 响应
 ```
 
@@ -110,7 +110,7 @@ env_key: MY_PROVIDER_API_KEY
 
 models:
   - name: my-model
-    litellm_model: openai/my-model
+    litellm_model: openai/my-model   # LiteLLM 模型标识，必须包含 provider 前缀
     api_base: https://api.my-provider.com/v1
     max_tokens: 4096
 ```
@@ -149,7 +149,7 @@ uv run pytest tests/test_translator.py -v
 
 1. Codex CLI 发送 Responses API 请求到 `POST /v1/responses`
 2. 代理将 `instructions` 转为 system message，将 `input` 转为 messages 数组
-3. 代理向 DeepSeek 等后端发送标准 Chat Completions 请求
+3. 代理通过 LiteLLM SDK 向 DeepSeek 等后端发送标准 Chat Completions 请求
 4. 后端返回 Chat Completions 响应
 5. 代理将响应翻译回 Responses API 格式返回给 Codex CLI
 6. 流式响应 (SSE) 同样完整翻译事件格式

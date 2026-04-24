@@ -9,6 +9,7 @@
 | 入口 | 所属模块 | 解决的问题 | 被谁使用 |
 |---|---|---|---|
 | `Preset` / `ModelEntry` dataclass | `config.py` | 预设数据的结构定义及 YAML 解析 | cli.py, proxy.py, codex_setup.py, configurator.py |
+| `Preset.resolve_model(name)` | `config.py` | 按公开模型名解析到具体 `ModelEntry`，并统一默认模型回退逻辑 | proxy.py, litellm_client.py |
 | `load_preset(name, custom_dir)` | `config.py` | 按名称加载预设（自定义目录优先，回退内置） | cli.py, proxy.py, configurator.py |
 | `list_presets(custom_dir)` | `config.py` | 列出所有可用预设名称 | cli.py, configurator.py |
 | `get_user_config_dir()` | `config.py` | 返回用户配置目录 `~/.config/codex-adapter/` | proxy.py, config.py 内部 |
@@ -24,6 +25,7 @@
 | `responses_request_to_chat(body, model_config)` | `translator.py` | 将 Responses API 请求体转为 Chat Completions 请求体 | proxy.py |
 | `chat_response_to_responses(chat_resp, original_model)` | `translator.py` | 将 Chat Completions 响应体转为 Responses API 响应体 | proxy.py |
 | `translate_stream(...)` | `translator.py` | SSE 流式翻译：逐 event 转换 Chat Completions → Responses 格式 | proxy.py |
+| `build_completion_kwargs(...)` / `request_chat_completion(...)` / `serialize_completion_*` | `litellm_client.py` | 统一通过 LiteLLM 构造上游请求、执行调用并序列化普通/流式响应 | proxy.py |
 
 ## 🚀 部署与配置
 

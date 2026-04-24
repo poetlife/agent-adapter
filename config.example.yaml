@@ -8,7 +8,7 @@ env_key: MY_PROVIDER_API_KEY
 
 models:
   - name: my-model-chat
-    litellm_model: openai/my-model-chat    # LiteLLM model identifier
+    litellm_model: openai/my-model-chat    # LiteLLM model identifier, include provider prefix
     api_base: https://api.my-provider.com/v1
     max_tokens: 4096
 

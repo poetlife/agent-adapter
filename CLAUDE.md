@@ -37,14 +37,15 @@ uv run codex-adapter service stop
 ## Architecture
 
 ```
-Codex CLI → POST /v1/responses → proxy.py → translator.py → POST /v1/chat/completions → DeepSeek
-                                                ← translates response back ←
+Codex CLI → POST /v1/responses → proxy.py → translator.py → litellm_client.py → LiteLLM SDK → DeepSeek
+                                                            ← translates response back ←
 ```
 
 **Core data flow** (3 files to understand):
 
-- **`proxy.py`** — Starlette ASGI app with 4 routes. Receives requests, calls translator, forwards to backend via httpx async client. Handles both streaming and non-streaming.
+- **`proxy.py`** — Starlette ASGI app with 4 routes. Receives requests, calls translator, then dispatches via the shared LiteLLM client. Handles both streaming and non-streaming.
 - **`translator.py`** — The heart of the project (~530 lines). `responses_request_to_chat()` converts inbound requests, `chat_response_to_responses()` converts responses, `translate_stream()` handles SSE event-by-event translation. Also maps Codex `reasoning.effort` → DeepSeek `thinking` params.
+- **`litellm_client.py`** — The single upstream call path. Builds LiteLLM kwargs from preset data, executes async chat completions, and normalizes regular/streaming responses plus error metadata.
 - **`config.py`** — Preset system. `Preset` and `ModelEntry` dataclasses loaded from YAML files. Built-in presets live in `presets/deepseek.yaml`, user custom presets in `~/.config/codex-adapter/presets/`.
 
 **CLI layer** (`cli.py`): Click-based. Commands: `start`, `list`, `setup`, `deploy`, `service` (group with start/stop/restart/status/logs/install-systemd).
@@ -58,9 +59,11 @@ Codex CLI → POST /v1/responses → proxy.py → translator.py → POST /v1/cha
 ## Key Design Decisions
 
 - **All I/O is async** (httpx, Starlette, uvicorn). Don't introduce sync blocking calls in the request path.
+- **All upstream model access must go through LiteLLM** via `codex_adapter.litellm_client`. Do not call provider chat-completions endpoints directly from `proxy.py` or other request-path code with raw `httpx`.
 - **Thinking mode mapping is non-trivial**: DeepSeek's minimum is `high`, so Codex's `low`/`medium` both map to `high`. When thinking is enabled, `temperature`/`top_p` are dropped (DeepSeek restriction).
 - **Deploy module uses pure functions** where possible (e.g., `generate_env_content()`, `generate_unit()`) for testability and future API/platform reuse.
 - **Preset YAML is the configuration boundary** — all provider-specific details (api_base, model names, thinking support) are encapsulated in presets, not hardcoded.
+- **Dependencies must be pinned exactly** in `pyproject.toml` (`==` only for runtime, dev, and build-system dependencies), and every dependency change must update `uv.lock` in the same change.
 
 ## Testing
 

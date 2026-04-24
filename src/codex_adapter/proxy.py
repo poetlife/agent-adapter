@@ -1,7 +1,7 @@
 """Proxy server that translates Responses API → Chat Completions API.
 
 Codex CLI sends:  POST /v1/responses  (Responses API format)
-This proxy:       POST /v1/chat/completions  (to LiteLLM / DeepSeek / etc.)
+This proxy:       POST /v1/chat/completions  (via LiteLLM to DeepSeek / etc.)
 
 The proxy handles both streaming and non-streaming requests, translating
 the protocol in both directions transparently.
@@ -13,13 +13,9 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-import httpx
 import uvicorn
-import yaml
 from rich.console import Console
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -27,6 +23,13 @@ from starlette.responses import JSONResponse, StreamingResponse, Response
 from starlette.routing import Route
 
 from codex_adapter.config import Preset, get_user_config_dir
+from codex_adapter.litellm_client import (
+    litellm_error_message,
+    litellm_error_status_code,
+    request_chat_completion,
+    serialize_completion_response,
+    serialize_completion_stream,
+)
 from codex_adapter.translator import (
     ModelConfig,
     chat_response_to_responses,
@@ -115,31 +118,24 @@ def _sanitize_messages_for_log(messages: list[dict]) -> list[dict]:
     return result
 
 
-def _build_backend_url(preset: Preset, model_name: str | None = None) -> str:
-    """Determine the backend Chat Completions URL for a given model."""
-    # Find the matching model in the preset
-    target = None
-    if model_name:
-        for m in preset.models:
-            if m.name == model_name:
-                target = m
-                break
-    if target is None and preset.models:
-        target = preset.models[0]
-
-    if target is None:
-        raise ValueError("No models defined in preset")
-
-    api_base = target.api_base.rstrip("/")
-    return f"{api_base}/chat/completions"
+def _strip_reasoning_for_retry(chat_body: dict[str, Any]) -> dict[str, Any]:
+    """Disable thinking and strip reasoning_content for one retry attempt."""
+    fallback_body = dict(chat_body)
+    fallback_body.pop("thinking", None)
+    fallback_body.pop("reasoning_effort", None)
+    fallback_body["messages"] = [dict(msg) for msg in chat_body.get("messages", [])]
+    for msg in fallback_body["messages"]:
+        msg.pop("reasoning_content", None)
+    return fallback_body
 
 
-def _get_api_key(preset: Preset) -> str:
-    """Get the API key from environment."""
-    key = os.environ.get(preset.env_key, "")
-    if not key:
-        raise ValueError(f"Environment variable {preset.env_key} is not set")
-    return key
+def _should_retry_without_reasoning(exc: Exception, chat_body: dict[str, Any]) -> bool:
+    """Retry once when DeepSeek rejects reasoning_content in multi-turn context."""
+    return (
+        litellm_error_status_code(exc) == 400
+        and "reasoning_content" in litellm_error_message(exc)
+        and chat_body.get("thinking", {}).get("type") == "enabled"
+    )
 
 
 def create_app(preset: Preset) -> Starlette:
@@ -152,13 +148,7 @@ def create_app(preset: Preset) -> Starlette:
         is_stream = body.get("stream", False)
 
         # Find matching model entry for thinking config
-        model_entry = None
-        for m in preset.models:
-            if m.name == model_name:
-                model_entry = m
-                break
-        if model_entry is None and preset.models:
-            model_entry = preset.models[0]
+        model_entry = preset.resolve_model(model_name)
 
         # Build model config for translator
         model_config = ModelConfig(
@@ -170,7 +160,7 @@ def create_app(preset: Preset) -> Starlette:
         # Translate Responses API request → Chat Completions request
         chat_body = responses_request_to_chat(body, model_config=model_config)
 
-        # Map model name to litellm_model identifier
+        # Map model name to LiteLLM identifier
         if model_entry:
             chat_body["model"] = model_entry.litellm_model
 
@@ -198,114 +188,87 @@ def create_app(preset: Preset) -> Starlette:
             "messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
         })
 
-        # Build backend request
-        backend_url = _build_backend_url(preset, model_name)
-        api_key = _get_api_key(preset)
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-
         if is_stream:
-            return await _handle_streaming(backend_url, headers, chat_body, model_name)
+            return await _handle_streaming(chat_body, model_name)
         else:
-            return await _handle_non_streaming(backend_url, headers, chat_body, model_name)
+            return await _handle_non_streaming(chat_body, model_name)
 
-    async def _handle_non_streaming(
-        url: str, headers: dict, chat_body: dict, original_model: str
-    ) -> JSONResponse:
+    async def _handle_non_streaming(chat_body: dict, original_model: str) -> JSONResponse:
         """Forward non-streaming request and translate response."""
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(url, json=chat_body, headers=headers)
-
-        if resp.status_code != 200:
+        try:
+            chat_resp = await request_chat_completion(preset, chat_body, model_name=original_model)
+        except Exception as exc:
+            status_code = litellm_error_status_code(exc)
+            error_msg = litellm_error_message(exc)
             _log_debug("[ERR] Non-streaming backend error", {
-                "status": resp.status_code,
-                "error": resp.text[:2000],
+                "status": status_code,
+                "error": error_msg[:2000],
             })
             return JSONResponse(
-                {"error": {"message": resp.text, "type": "upstream_error", "code": resp.status_code}},
-                status_code=resp.status_code,
+                {"error": {"message": error_msg, "type": "upstream_error", "code": status_code}},
+                status_code=status_code,
             )
 
-        chat_resp = resp.json()
+        chat_resp = serialize_completion_response(chat_resp)
         responses_resp = chat_response_to_responses(chat_resp, original_model)
         return JSONResponse(responses_resp)
 
-    async def _handle_streaming(
-        url: str, headers: dict, chat_body: dict, original_model: str
-    ) -> StreamingResponse:
+    async def _handle_streaming(chat_body: dict, original_model: str) -> StreamingResponse:
         """Forward streaming request and translate SSE events."""
 
         async def event_generator():
             nonlocal chat_body
-            async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream("POST", url, json=chat_body, headers=headers) as resp:
-                    if resp.status_code != 200:
-                        error_body = await resp.aread()
-                        error_msg = error_body.decode("utf-8", errors="replace")
-
-                        _log_debug("[ERR] Backend returned non-200", {
-                            "status": resp.status_code,
-                            "error": error_msg,
-                            "chat_body_messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
-                            "thinking": chat_body.get("thinking"),
-                        })
-
-                        # DeepSeek thinking mode requires reasoning_content in
-                        # multi-turn context.  If we get this specific error,
-                        # retry once with thinking disabled as a fallback.
-                        if (
-                            resp.status_code == 400
-                            and "reasoning_content" in error_msg
-                            and chat_body.get("thinking", {}).get("type") == "enabled"
-                        ):
-                            chat_body.pop("thinking", None)
-                            chat_body.pop("reasoning_effort", None)
-                            # Strip reasoning_content from messages too —
-                            # DeepSeek rejects it when thinking is disabled.
-                            for msg in chat_body.get("messages", []):
-                                msg.pop("reasoning_content", None)
-                            async with client.stream("POST", url, json=chat_body, headers=headers) as retry_resp:
-                                if retry_resp.status_code == 200:
-                                    async for chunk in translate_stream(retry_resp.aiter_lines(), original_model):
-                                        yield chunk
-                                    return
-                                # Retry also failed — fall through to error path
-                                error_body = await retry_resp.aread()
-                                error_msg = error_body.decode("utf-8", errors="replace")
-
-                        error_event = {
-                            "error": {
-                                "message": error_msg,
-                                "type": "upstream_error",
-                                "code": resp.status_code,
-                            }
-                        }
-                        yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
-                        # Codex CLI expects response.failed with proper wrapping
-                        import time as _time
-                        import uuid as _uuid
-                        failed_resp = {
-                            "id": f"resp_{_uuid.uuid4().hex[:24]}",
-                            "object": "response",
-                            "created_at": int(_time.time()),
-                            "model": original_model,
-                            "output": [],
-                            "output_text": "",
-                            "status": "failed",
-                            "error": {
-                                "code": str(resp.status_code),
-                                "message": error_msg,
-                            },
-                            "usage": None,
-                        }
-                        yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': failed_resp})}\n\n".encode()
+            try:
+                stream = await request_chat_completion(preset, chat_body, model_name=original_model)
+                async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
+                    yield chunk
+                return
+            except Exception as exc:
+                if _should_retry_without_reasoning(exc, chat_body):
+                    chat_body = _strip_reasoning_for_retry(chat_body)
+                    try:
+                        stream = await request_chat_completion(preset, chat_body, model_name=original_model)
+                        async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
+                            yield chunk
                         return
+                    except Exception as retry_exc:
+                        exc = retry_exc
 
-                    async for chunk in translate_stream(resp.aiter_lines(), original_model):
-                        yield chunk
+                error_msg = litellm_error_message(exc)
+                error_code = litellm_error_status_code(exc)
+                _log_debug("[ERR] Backend returned non-200", {
+                    "status": error_code,
+                    "error": error_msg,
+                    "chat_body_messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
+                    "thinking": chat_body.get("thinking"),
+                })
+                error_event = {
+                    "error": {
+                        "message": error_msg,
+                        "type": "upstream_error",
+                        "code": error_code,
+                    }
+                }
+                yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
+                # Codex CLI expects response.failed with proper wrapping
+                import time as _time
+                import uuid as _uuid
+                failed_resp = {
+                    "id": f"resp_{_uuid.uuid4().hex[:24]}",
+                    "object": "response",
+                    "created_at": int(_time.time()),
+                    "model": original_model,
+                    "output": [],
+                    "output_text": "",
+                    "status": "failed",
+                    "error": {
+                        "code": str(error_code),
+                        "message": error_msg,
+                    },
+                    "usage": None,
+                }
+                yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': failed_resp})}\n\n".encode()
+                return
 
         return StreamingResponse(
             event_generator(),
@@ -378,24 +341,34 @@ def create_app(preset: Preset) -> Starlette:
         is_stream = body.get("stream", False)
 
         # Map model name
-        for m in preset.models:
-            if m.name == model_name:
-                body["model"] = m.litellm_model
-                break
-
-        backend_url = _build_backend_url(preset, model_name)
-        api_key = _get_api_key(preset)
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
+        model_entry = preset.resolve_model(model_name)
+        if model_entry:
+            body["model"] = model_entry.litellm_model
 
         if is_stream:
+            try:
+                stream = await request_chat_completion(preset, body, model_name=model_name)
+            except Exception as exc:
+                error_code = litellm_error_status_code(exc)
+                error_msg = litellm_error_message(exc)
+                return JSONResponse(
+                    {"error": {"message": error_msg, "type": "upstream_error", "code": error_code}},
+                    status_code=error_code,
+                )
+
             async def stream_passthrough():
-                async with httpx.AsyncClient(timeout=300) as client:
-                    async with client.stream("POST", backend_url, json=body, headers=headers) as resp:
-                        async for chunk in resp.aiter_bytes():
-                            yield chunk
+                try:
+                    async for chunk in serialize_completion_stream(stream):
+                        yield chunk
+                except Exception as exc:
+                    error_payload = {
+                        "error": {
+                            "message": litellm_error_message(exc),
+                            "type": "upstream_error",
+                            "code": litellm_error_status_code(exc),
+                        }
+                    }
+                    yield f"data: {json.dumps(error_payload)}\n\n".encode("utf-8")
 
             return StreamingResponse(
                 stream_passthrough(),
@@ -403,9 +376,16 @@ def create_app(preset: Preset) -> Starlette:
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
         else:
-            async with httpx.AsyncClient(timeout=300) as client:
-                resp = await client.post(backend_url, json=body, headers=headers)
-            return JSONResponse(resp.json(), status_code=resp.status_code)
+            try:
+                resp = await request_chat_completion(preset, body, model_name=model_name)
+            except Exception as exc:
+                error_code = litellm_error_status_code(exc)
+                error_msg = litellm_error_message(exc)
+                return JSONResponse(
+                    {"error": {"message": error_msg, "type": "upstream_error", "code": error_code}},
+                    status_code=error_code,
+                )
+            return JSONResponse(serialize_completion_response(resp))
 
     async def handle_health(request: Request) -> JSONResponse:
         """Health check endpoint."""
