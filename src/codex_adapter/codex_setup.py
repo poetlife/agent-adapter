@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -10,7 +11,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
+from codex_adapter.config import ModelEntry
+
 console = Console()
+
+CODEX_CONFIG_DIR = Path.home() / ".codex"
+MODEL_CATALOG_PATH = CODEX_CONFIG_DIR / "model-catalog.json"
 
 
 def detect_codex_cli() -> str | None:
@@ -42,6 +48,7 @@ def generate_codex_config_toml(
     switch with `codex -p <name>` (e.g. `codex -p flash`, `codex -p pro`).
     """
     model_line = f'model = "{model}"' if model else '# model = "deepseek-v4-flash"'
+    catalog_path = str(MODEL_CATALOG_PATH)
 
     lines = [
         "# Codex Adapter - Auto-generated config",
@@ -51,6 +58,7 @@ def generate_codex_config_toml(
         "",
         model_line,
         'model_provider = "codex-adapter"',
+        f'model_catalog_json = "{catalog_path}"',
         "",
         "[model_providers.codex-adapter]",
         'name = "Codex Adapter Proxy"',
@@ -63,7 +71,6 @@ def generate_codex_config_toml(
     if all_models:
         lines.append("")
         for m in all_models:
-            # Short profile name: strip common prefix to get "flash", "pro", etc.
             short = _short_profile_name(m)
             lines.append(f"[profiles.{short}]")
             lines.append(f'model = "{m}"')
@@ -83,6 +90,71 @@ def _short_profile_name(model_name: str) -> str:
     if len(parts) == 2 and len(parts[1]) >= 2:
         return parts[1]
     return model_name
+
+
+def generate_model_catalog(models: list[ModelEntry]) -> dict:
+    """Generate a Codex CLI model catalog (ModelsResponse format).
+
+    This is the JSON structure Codex CLI deserializes as ModelsResponse{models: [ModelInfo]}.
+    When loaded via model_catalog_json, it replaces the remote OpenAI catalog,
+    so Codex TUI recognizes our custom models without the fallback metadata warning.
+    """
+    catalog_models = []
+    for m in models:
+        if m.supports_thinking:
+            reasoning_levels = [
+                {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                {"effort": "medium", "description": "Balanced speed and reasoning depth"},
+                {"effort": "high", "description": "Greater reasoning depth"},
+            ]
+            default_reasoning = "medium"
+        else:
+            reasoning_levels = []
+            default_reasoning = None
+
+        catalog_models.append({
+            "slug": m.name,
+            "display_name": m.name,
+            "description": m.description or f"Model: {m.name}",
+            "default_reasoning_level": default_reasoning,
+            "supported_reasoning_levels": reasoning_levels,
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": True,
+            "priority": 1,
+            "additional_speed_tiers": [],
+            "availability_nux": None,
+            "upgrade": None,
+            "base_instructions": "",
+            "supports_reasoning_summaries": m.supports_thinking,
+            "default_reasoning_summary": "none",
+            "support_verbosity": False,
+            "default_verbosity": None,
+            "apply_patch_tool_type": "freeform",
+            "web_search_tool_type": "text",
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+            "supports_parallel_tool_calls": True,
+            "supports_image_detail_original": False,
+            "context_window": m.context_length,
+            "max_context_window": m.context_length,
+            "effective_context_window_percent": 90,
+            "experimental_supported_tools": [],
+            "input_modalities": ["text"],
+        })
+
+    return {"models": catalog_models}
+
+
+def write_model_catalog(models: list[ModelEntry]) -> Path:
+    """Write the model catalog JSON file for Codex CLI.
+
+    Returns the path written.
+    """
+    CODEX_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    catalog = generate_model_catalog(models)
+    MODEL_CATALOG_PATH.write_text(json.dumps(catalog, indent=2, ensure_ascii=False))
+    console.print(f"[green]Model catalog written:[/] {MODEL_CATALOG_PATH}")
+    return MODEL_CATALOG_PATH
 
 
 def print_setup_instructions(

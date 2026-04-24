@@ -217,7 +217,7 @@ def create_app(preset: Preset) -> Starlette:
                 "support_verbosity": False,
                 "default_verbosity": None,
                 "apply_patch_tool_type": "freeform",
-                "web_search_tool_type": "none",
+                "web_search_tool_type": "text",
                 "truncation_policy": {"mode": "tokens", "limit": 10000},
                 "supports_parallel_tool_calls": True,
                 "supports_image_detail_original": False,

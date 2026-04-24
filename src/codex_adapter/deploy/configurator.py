@@ -15,7 +15,7 @@ from typing import Any
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from codex_adapter.codex_setup import generate_codex_config_toml
+from codex_adapter.codex_setup import generate_codex_config_toml, write_model_catalog
 from codex_adapter.config import list_presets, load_preset, get_user_presets_dir
 
 console = Console()
@@ -121,8 +121,9 @@ def write_codex_config_file(
         has_correct_wire = 'wire_api = "responses"' in existing
         has_bad_wire = 'wire_api = "chat"' in existing
         has_profiles = "[profiles." in existing
+        has_catalog = "model_catalog_json" in existing
 
-        if has_adapter and has_correct_wire and not has_bad_wire and has_profiles:
+        if has_adapter and has_correct_wire and not has_bad_wire and has_profiles and has_catalog:
             console.print(
                 f"[green]Codex config already correctly configured:[/] {CODEX_CONFIG_FILE}"
             )
@@ -302,6 +303,9 @@ def configure_all(
     codex_path = write_codex_config_file(
         port=port, model=default_model, all_models=all_model_names,
     )
+
+    # Write model catalog JSON (so Codex TUI recognizes our models)
+    write_model_catalog(preset_obj.models)
 
     # Inject shell profile
     profile_path = inject_shell_profile(env_path)
