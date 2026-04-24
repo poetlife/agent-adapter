@@ -1,0 +1,18 @@
+# Example: codex-adapter configuration
+# Copy this file and modify for your own model provider.
+# Place custom presets in: ~/.config/codex-adapter/presets/
+
+provider: my-provider
+description: "My custom model provider"
+env_key: MY_PROVIDER_API_KEY
+
+models:
+  - name: my-model-chat
+    litellm_model: openai/my-model-chat    # LiteLLM model identifier
+    api_base: https://api.my-provider.com/v1
+    max_tokens: 4096
+
+  - name: my-model-code
+    litellm_model: openai/my-model-code
+    api_base: https://api.my-provider.com/v1
+    max_tokens: 8192
