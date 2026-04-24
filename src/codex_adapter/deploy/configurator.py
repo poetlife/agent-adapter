@@ -94,7 +94,11 @@ def write_env_file(
 # Codex CLI config
 # ---------------------------------------------------------------------------
 
-def write_codex_config_file(port: int = 4000, model: str | None = None) -> Path | None:
+def write_codex_config_file(
+    port: int = 4000,
+    model: str | None = None,
+    all_models: list[str] | None = None,
+) -> Path | None:
     """Generate and write Codex CLI config.toml.
 
     Strategy:
@@ -107,7 +111,7 @@ def write_codex_config_file(port: int = 4000, model: str | None = None) -> Path 
     """
     CODEX_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    section = generate_codex_config_toml(port=port, model=model)
+    section = generate_codex_config_toml(port=port, model=model, all_models=all_models)
 
     if CODEX_CONFIG_FILE.exists():
         existing = CODEX_CONFIG_FILE.read_text()
@@ -116,8 +120,9 @@ def write_codex_config_file(port: int = 4000, model: str | None = None) -> Path 
         has_adapter = "codex-adapter" in existing
         has_correct_wire = 'wire_api = "responses"' in existing
         has_bad_wire = 'wire_api = "chat"' in existing
+        has_profiles = "[profiles." in existing
 
-        if has_adapter and has_correct_wire and not has_bad_wire:
+        if has_adapter and has_correct_wire and not has_bad_wire and has_profiles:
             console.print(
                 f"[green]Codex config already correctly configured:[/] {CODEX_CONFIG_FILE}"
             )
@@ -293,7 +298,10 @@ def configure_all(
 
     # Write Codex config
     default_model = preset_obj.models[0].name if preset_obj.models else None
-    codex_path = write_codex_config_file(port=port, model=default_model)
+    all_model_names = [m.name for m in preset_obj.models]
+    codex_path = write_codex_config_file(
+        port=port, model=default_model, all_models=all_model_names,
+    )
 
     # Inject shell profile
     profile_path = inject_shell_profile(env_path)

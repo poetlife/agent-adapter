@@ -27,27 +27,62 @@ def generate_shell_exports(port: int = 4000, model: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def generate_codex_config_toml(port: int = 4000, model: str | None = None) -> str:
+def generate_codex_config_toml(
+    port: int = 4000,
+    model: str | None = None,
+    all_models: list[str] | None = None,
+) -> str:
     """Generate Codex CLI config.toml content for the adapter proxy.
 
     Codex CLI talks Responses API to our proxy (wire_api = "responses"),
     the proxy translates to Chat Completions before forwarding to the
     actual model provider.
+
+    Generates a [profiles.<name>] section for each model so users can
+    switch with `codex -p <name>` (e.g. `codex -p flash`, `codex -p pro`).
     """
     model_line = f'model = "{model}"' if model else '# model = "deepseek-v4-flash"'
-    return f"""\
-# Codex Adapter - Auto-generated config
-# Place this in ~/.codex/config.toml
 
-{model_line}
-model_provider = "codex-adapter"
+    lines = [
+        "# Codex Adapter - Auto-generated config",
+        "# Place this in ~/.codex/config.toml",
+        "#",
+        "# Switch models with:  codex -p flash  /  codex -p pro",
+        "",
+        model_line,
+        'model_provider = "codex-adapter"',
+        "",
+        "[model_providers.codex-adapter]",
+        'name = "Codex Adapter Proxy"',
+        f'base_url = "http://localhost:{port}/v1"',
+        'env_key = "OPENAI_API_KEY"',
+        'wire_api = "responses"',
+    ]
 
-[model_providers.codex-adapter]
-name = "Codex Adapter Proxy"
-base_url = "http://localhost:{port}/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-"""
+    # Generate a profile for each model
+    if all_models:
+        lines.append("")
+        for m in all_models:
+            # Short profile name: strip common prefix to get "flash", "pro", etc.
+            short = _short_profile_name(m)
+            lines.append(f"[profiles.{short}]")
+            lines.append(f'model = "{m}"')
+            lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def _short_profile_name(model_name: str) -> str:
+    """Derive a short profile name from a model slug.
+
+    'deepseek-v4-flash' → 'flash'
+    'deepseek-v4-pro'   → 'pro'
+    'my-model'          → 'my-model'
+    """
+    parts = model_name.rsplit("-", 1)
+    if len(parts) == 2 and len(parts[1]) >= 2:
+        return parts[1]
+    return model_name
 
 
 def print_setup_instructions(
@@ -99,6 +134,10 @@ codex-adapter start --preset {provider}
 
 # Use Codex CLI (in terminal 2):
 codex{model_flag} "help me fix this bug"
+
+# Switch models with profiles:
+codex -p flash "your prompt"    # uses flash model
+codex -p pro "your prompt"      # uses pro model
 """
     console.print(Panel(
         Syntax(usage, "bash", theme="monokai"),
