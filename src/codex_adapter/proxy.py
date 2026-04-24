@@ -176,15 +176,58 @@ def create_app(preset: Preset) -> Starlette:
         )
 
     async def handle_models(request: Request) -> JSONResponse:
-        """Handle GET /v1/models — list available models."""
+        """Handle GET /v1/models — list available models.
+
+        Returns the Codex CLI model catalog format (ModelsResponse):
+        {"models": [ModelInfo, ...]}
+
+        Each ModelInfo must include metadata fields that Codex CLI expects
+        (slug, display_name, shell_type, supported_reasoning_levels, etc.).
+        """
         models = []
         for m in preset.models:
+            # Build reasoning levels based on model thinking support
+            if m.supports_thinking:
+                reasoning_levels = [
+                    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                    {"effort": "medium", "description": "Balanced speed and reasoning depth"},
+                    {"effort": "high", "description": "Greater reasoning depth"},
+                ]
+                default_reasoning = "medium"
+            else:
+                reasoning_levels = []
+                default_reasoning = None
+
             models.append({
-                "id": m.name,
-                "object": "model",
-                "owned_by": preset.provider,
+                "slug": m.name,
+                "display_name": m.name,
+                "description": m.description or f"{preset.provider} model",
+                "default_reasoning_level": default_reasoning,
+                "supported_reasoning_levels": reasoning_levels,
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "supported_in_api": True,
+                "priority": 1,
+                "additional_speed_tiers": [],
+                "availability_nux": None,
+                "upgrade": None,
+                "base_instructions": "",
+                "supports_reasoning_summaries": m.supports_thinking,
+                "default_reasoning_summary": "none",
+                "support_verbosity": False,
+                "default_verbosity": None,
+                "apply_patch_tool_type": "freeform",
+                "web_search_tool_type": "none",
+                "truncation_policy": {"mode": "tokens", "limit": 10000},
+                "supports_parallel_tool_calls": True,
+                "supports_image_detail_original": False,
+                "context_window": m.context_length,
+                "max_context_window": m.context_length,
+                "effective_context_window_percent": 90,
+                "experimental_supported_tools": [],
+                "input_modalities": ["text"],
             })
-        return JSONResponse({"object": "list", "data": models})
+        return JSONResponse({"models": models})
 
     async def handle_chat_completions(request: Request) -> Response:
         """Handle POST /v1/chat/completions — pass-through for direct Chat Completions calls."""

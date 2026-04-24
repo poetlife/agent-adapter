@@ -43,17 +43,23 @@ class TestModelsEndpoint:
         resp = client.get("/v1/models")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["object"] == "list"
-        assert len(data["data"]) == 2
-        names = [m["id"] for m in data["data"]]
-        assert "deepseek-chat" in names
-        assert "deepseek-coder" in names
+        assert "models" in data
+        assert len(data["models"]) == 2
+        slugs = [m["slug"] for m in data["models"]]
+        assert "deepseek-chat" in slugs
+        assert "deepseek-coder" in slugs
 
-    def test_model_owned_by(self, client):
+    def test_model_metadata(self, client):
         resp = client.get("/v1/models")
         data = resp.json()
-        for model in data["data"]:
-            assert model["owned_by"] == "deepseek"
+        for model in data["models"]:
+            # Required fields for Codex CLI ModelInfo
+            assert "slug" in model
+            assert "display_name" in model
+            assert "shell_type" in model
+            assert "visibility" in model
+            assert "supported_reasoning_levels" in model
+            assert "context_window" in model
 
 
 class TestHealthEndpoint:
