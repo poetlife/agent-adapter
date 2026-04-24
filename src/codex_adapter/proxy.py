@@ -280,7 +280,7 @@ def create_app(preset: Preset) -> Starlette:
             },
         )
 
-    async def handle_models(request: Request) -> JSONResponse:
+    async def handle_models(_request: Request) -> JSONResponse:
         """Handle GET /v1/models — list available models.
 
         Returns the Codex CLI model catalog format (ModelsResponse):
@@ -387,7 +387,7 @@ def create_app(preset: Preset) -> Starlette:
                 )
             return JSONResponse(serialize_completion_response(resp))
 
-    async def handle_health(request: Request) -> JSONResponse:
+    async def handle_health(_request: Request) -> JSONResponse:
         """Health check endpoint."""
         return JSONResponse({"status": "ok", "provider": preset.provider})
 
@@ -427,12 +427,12 @@ def start_proxy(
     console.print(f"  Provider   : [cyan]{preset.provider}[/]")
     console.print(f"  Models     : [cyan]{', '.join(m.name for m in preset.models)}[/]")
     console.print(f"  Listen     : [cyan]http://{host}:{port}[/]")
-    console.print(f"  Translate  : [yellow]Responses API → Chat Completions[/]")
+    console.print("  Translate  : [yellow]Responses API → Chat Completions[/]")
     console.print(f"  Debug log  : [cyan]{log_path}[/]")
     console.print()
     console.print("[bold yellow]Codex CLI usage:[/]")
     console.print(f"  export OPENAI_BASE_URL=http://localhost:{port}/v1")
-    console.print(f"  export OPENAI_API_KEY=sk-placeholder")
+    console.print("  export OPENAI_API_KEY=sk-placeholder")
     console.print(f"  codex --model {preset.models[0].name} \"your prompt\"")
     console.print()
     console.print("[dim]Press Ctrl+C to stop the proxy.[/]")
