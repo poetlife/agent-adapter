@@ -8,7 +8,7 @@
 
 `entrypoints` -> `protocols` -> `providers.litellm_client` -> `DeepSeek / Hunyuan / other providers`
 
-`codex_adapter` 只负责 Codex 场景下的 CLI、setup、deploy 和兼容导出。
+`codex_adapter` 只负责 Codex 场景下的 CLI、setup、deploy 和少量仍保留的兼容导出。
 
 ## Package Layout
 
@@ -31,7 +31,6 @@ src/
     codex_setup.py        # Codex 快速配置
     deploy/               # 安装/部署/后台服务
     config.py             # 兼容 re-export
-    proxy.py              # 兼容 re-export
     translator.py         # 兼容 re-export
 ```
 
@@ -53,6 +52,6 @@ src/
 
 ## Migration Notes
 
-- 旧路径 `codex_adapter.config` / `logging_utils` / `litellm_client` / `translator` / `proxy` 目前保留为兼容 re-export。
+- 目前仅保留少量旧路径作为兼容 re-export，例如 `codex_adapter.config`、`codex_adapter.litellm_client`、`codex_adapter.translator`。
 - 新代码应优先引用顶层包：`common`、`providers`、`protocols`、`entrypoints`。
 - 如果未来新增其他 adapter，应放在与 `codex_adapter` 并列的位置，并复用上面的顶层能力，而不是继续向 `codex_adapter` 内部塞公共模块。

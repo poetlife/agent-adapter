@@ -51,7 +51,5 @@
 | 兼容模块 | Canonical 模块 | 说明 |
 |---|---|---|
 | `codex_adapter.config` | `providers.catalog` | 保留导入兼容，禁止新增真实实现 |
-| `codex_adapter.logging_utils` | `common.logging` | 保留导入兼容，禁止新增真实实现 |
 | `codex_adapter.litellm_client` | `providers.litellm_client` | 保留导入兼容，禁止新增真实实现 |
 | `codex_adapter.translator` | `protocols.responses_chat` | 保留导入兼容，禁止新增真实实现 |
-| `codex_adapter.proxy` | `entrypoints.responses_proxy` | 保留导入兼容，禁止新增真实实现 |
