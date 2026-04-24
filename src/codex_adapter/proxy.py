@@ -10,7 +10,6 @@ the protocol in both directions transparently.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sys
 from typing import Any
@@ -22,13 +21,19 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse, Response
 from starlette.routing import Route
 
-from codex_adapter.config import Preset, get_user_config_dir
+from codex_adapter.config import Preset
 from codex_adapter.litellm_client import (
     litellm_error_message,
     litellm_error_status_code,
     request_chat_completion,
     serialize_completion_response,
     serialize_completion_stream,
+)
+from codex_adapter.logging_utils import (
+    init_logging,
+    log_debug,
+    request_log_context,
+    resolve_trace_id,
 )
 from codex_adapter.translator import (
     ModelConfig,
@@ -38,53 +43,6 @@ from codex_adapter.translator import (
 )
 
 console = Console()
-
-# ---------------------------------------------------------------------------
-# Debug logger — writes to ~/.config/codex-adapter/debug.log when --debug
-# ---------------------------------------------------------------------------
-_debug_logger: logging.Logger | None = None
-
-
-def _init_debug_logger() -> logging.Logger:
-    """Create a file-backed logger for request/response diagnostics."""
-    global _debug_logger
-    if _debug_logger is not None:
-        return _debug_logger
-
-    log_dir = get_user_config_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "debug.log"
-
-    logger = logging.getLogger("codex_adapter.debug")
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-
-    # Rotate: keep last log, start fresh each run
-    if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:  # 10 MB
-        log_path.with_suffix(".log.old").unlink(missing_ok=True)
-        log_path.rename(log_path.with_suffix(".log.old"))
-
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    logger.addHandler(fh)
-
-    _debug_logger = logger
-    logger.info("=== codex-adapter debug log started ===")
-    return logger
-
-
-def _log_debug(msg: str, data: Any = None) -> None:
-    """Log a debug message + optional JSON payload (no-op if logger not init'd)."""
-    if _debug_logger is None:
-        return
-    if data is not None:
-        try:
-            text = json.dumps(data, ensure_ascii=False, indent=2)
-        except (TypeError, ValueError):
-            text = repr(data)
-        _debug_logger.debug("%s\n%s", msg, text)
-    else:
-        _debug_logger.debug(msg)
 
 
 def _sanitize_messages_for_log(messages: list[dict]) -> list[dict]:
@@ -144,131 +102,133 @@ def create_app(preset: Preset) -> Starlette:
     async def handle_responses(request: Request) -> Response:
         """Handle POST /v1/responses — the core translation endpoint."""
         body = await request.json()
+        trace_id, trace_id_source = resolve_trace_id(body, request.headers)
         model_name = body.get("model", "")
         is_stream = body.get("stream", False)
 
-        # Find matching model entry for thinking config
-        model_entry = preset.resolve_model(model_name)
+        with request_log_context(trace_id):
+            # Find matching model entry for thinking config
+            model_entry = preset.resolve_model(model_name)
 
-        # Build model config for translator
-        model_config = ModelConfig(
-            supports_thinking=model_entry.supports_thinking if model_entry else False,
-            default_thinking=model_entry.default_thinking if model_entry else "disabled",
-            reasoning_effort=model_entry.reasoning_effort if model_entry else "high",
-        )
-
-        # Translate Responses API request → Chat Completions request
-        chat_body = responses_request_to_chat(body, model_config=model_config)
-
-        # Map model name to LiteLLM identifier
-        if model_entry:
-            chat_body["model"] = model_entry.litellm_model
-
-        # --- Debug logging ---
-        _log_debug("[REQ] Responses API input", {
-            "model": model_name,
-            "stream": is_stream,
-            "input_item_count": len(body.get("input", [])) if isinstance(body.get("input"), list) else "string",
-            "reasoning": body.get("reasoning"),
-            "tools_count": len(body.get("tools", [])),
-        })
-        # Log the raw input items so we see exactly what Codex CLI sends
-        raw_input = body.get("input", "")
-        if isinstance(raw_input, list):
-            _log_debug("[REQ] Raw input items", [
-                {k: (v[:200] + "..." if isinstance(v, str) and len(v) > 200 else v)
-                 for k, v in item.items()}
-                for item in raw_input
-            ])
-        _log_debug("[REQ] Translated Chat Completions body", {
-            "model": chat_body.get("model"),
-            "thinking": chat_body.get("thinking"),
-            "reasoning_effort": chat_body.get("reasoning_effort"),
-            "message_count": len(chat_body.get("messages", [])),
-            "messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
-        })
-
-        if is_stream:
-            return await _handle_streaming(chat_body, model_name)
-        else:
-            return await _handle_non_streaming(chat_body, model_name)
-
-    async def _handle_non_streaming(chat_body: dict, original_model: str) -> JSONResponse:
-        """Forward non-streaming request and translate response."""
-        try:
-            chat_resp = await request_chat_completion(preset, chat_body, model_name=original_model)
-        except Exception as exc:
-            status_code = litellm_error_status_code(exc)
-            error_msg = litellm_error_message(exc)
-            _log_debug("[ERR] Non-streaming backend error", {
-                "status": status_code,
-                "error": error_msg[:2000],
-            })
-            return JSONResponse(
-                {"error": {"message": error_msg, "type": "upstream_error", "code": status_code}},
-                status_code=status_code,
+            # Build model config for translator
+            model_config = ModelConfig(
+                supports_thinking=model_entry.supports_thinking if model_entry else False,
+                default_thinking=model_entry.default_thinking if model_entry else "disabled",
+                reasoning_effort=model_entry.reasoning_effort if model_entry else "high",
             )
 
-        chat_resp = serialize_completion_response(chat_resp)
-        responses_resp = chat_response_to_responses(chat_resp, original_model)
-        return JSONResponse(responses_resp)
+            # Translate Responses API request → Chat Completions request
+            chat_body = responses_request_to_chat(body, model_config=model_config)
 
-    async def _handle_streaming(chat_body: dict, original_model: str) -> StreamingResponse:
+            # Map model name to LiteLLM identifier
+            if model_entry:
+                chat_body["model"] = model_entry.litellm_model
+
+            log_debug("[REQ] Responses API input", {
+                "trace_id_source": trace_id_source,
+                "model": model_name,
+                "stream": is_stream,
+                "input_item_count": len(body.get("input", [])) if isinstance(body.get("input"), list) else "string",
+                "reasoning": body.get("reasoning"),
+                "tools_count": len(body.get("tools", [])),
+            })
+            raw_input = body.get("input", "")
+            if isinstance(raw_input, list):
+                log_debug("[REQ] Raw input items", [
+                    {k: (v[:200] + "..." if isinstance(v, str) and len(v) > 200 else v)
+                     for k, v in item.items()}
+                    for item in raw_input
+                ])
+            log_debug("[REQ] Translated Chat Completions body", {
+                "model": chat_body.get("model"),
+                "thinking": chat_body.get("thinking"),
+                "reasoning_effort": chat_body.get("reasoning_effort"),
+                "message_count": len(chat_body.get("messages", [])),
+                "messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
+            })
+
+        if is_stream:
+            return await _handle_streaming(chat_body, model_name, trace_id)
+        return await _handle_non_streaming(chat_body, model_name, trace_id)
+
+    async def _handle_non_streaming(chat_body: dict, original_model: str, trace_id: str) -> JSONResponse:
+        """Forward non-streaming request and translate response."""
+        with request_log_context(trace_id):
+            try:
+                chat_resp = await request_chat_completion(preset, chat_body, model_name=original_model)
+            except Exception as exc:
+                status_code = litellm_error_status_code(exc)
+                error_msg = litellm_error_message(exc)
+                log_debug("[ERR] Non-streaming backend error", {
+                    "status": status_code,
+                    "error": error_msg[:2000],
+                })
+                return JSONResponse(
+                    {"error": {"message": error_msg, "type": "upstream_error", "code": status_code}},
+                    status_code=status_code,
+                )
+
+            chat_resp = serialize_completion_response(chat_resp)
+            responses_resp = chat_response_to_responses(chat_resp, original_model)
+            return JSONResponse(responses_resp)
+
+    async def _handle_streaming(chat_body: dict, original_model: str, trace_id: str) -> StreamingResponse:
         """Forward streaming request and translate SSE events."""
 
         async def event_generator():
             nonlocal chat_body
-            try:
-                stream = await request_chat_completion(preset, chat_body, model_name=original_model)
-                async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
-                    yield chunk
-                return
-            except Exception as exc:
-                if _should_retry_without_reasoning(exc, chat_body):
-                    chat_body = _strip_reasoning_for_retry(chat_body)
-                    try:
-                        stream = await request_chat_completion(preset, chat_body, model_name=original_model)
-                        async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
-                            yield chunk
-                        return
-                    except Exception as retry_exc:
-                        exc = retry_exc
+            with request_log_context(trace_id):
+                try:
+                    stream = await request_chat_completion(preset, chat_body, model_name=original_model)
+                    async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
+                        yield chunk
+                    return
+                except Exception as exc:
+                    if _should_retry_without_reasoning(exc, chat_body):
+                        chat_body = _strip_reasoning_for_retry(chat_body)
+                        try:
+                            stream = await request_chat_completion(preset, chat_body, model_name=original_model)
+                            async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
+                                yield chunk
+                            return
+                        except Exception as retry_exc:
+                            exc = retry_exc
 
-                error_msg = litellm_error_message(exc)
-                error_code = litellm_error_status_code(exc)
-                _log_debug("[ERR] Backend returned non-200", {
-                    "status": error_code,
-                    "error": error_msg,
-                    "chat_body_messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
-                    "thinking": chat_body.get("thinking"),
-                })
-                error_event = {
-                    "error": {
-                        "message": error_msg,
-                        "type": "upstream_error",
-                        "code": error_code,
+                    error_msg = litellm_error_message(exc)
+                    error_code = litellm_error_status_code(exc)
+                    log_debug("[ERR] Backend returned non-200", {
+                        "status": error_code,
+                        "error": error_msg,
+                        "chat_body_messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
+                        "thinking": chat_body.get("thinking"),
+                    })
+                    error_event = {
+                        "error": {
+                            "message": error_msg,
+                            "type": "upstream_error",
+                            "code": error_code,
+                        }
                     }
-                }
-                yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
-                # Codex CLI expects response.failed with proper wrapping
-                import time as _time
-                import uuid as _uuid
-                failed_resp = {
-                    "id": f"resp_{_uuid.uuid4().hex[:24]}",
-                    "object": "response",
-                    "created_at": int(_time.time()),
-                    "model": original_model,
-                    "output": [],
-                    "output_text": "",
-                    "status": "failed",
-                    "error": {
-                        "code": str(error_code),
-                        "message": error_msg,
-                    },
-                    "usage": None,
-                }
-                yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': failed_resp})}\n\n".encode()
-                return
+                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
+                    # Codex CLI expects response.failed with proper wrapping
+                    import time as _time
+                    import uuid as _uuid
+                    failed_resp = {
+                        "id": f"resp_{_uuid.uuid4().hex[:24]}",
+                        "object": "response",
+                        "created_at": int(_time.time()),
+                        "model": original_model,
+                        "output": [],
+                        "output_text": "",
+                        "status": "failed",
+                        "error": {
+                            "code": str(error_code),
+                            "message": error_msg,
+                        },
+                        "usage": None,
+                    }
+                    yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': failed_resp})}\n\n".encode()
+                    return
 
         return StreamingResponse(
             event_generator(),
@@ -337,50 +297,68 @@ def create_app(preset: Preset) -> Starlette:
     async def handle_chat_completions(request: Request) -> Response:
         """Handle POST /v1/chat/completions — pass-through for direct Chat Completions calls."""
         body = await request.json()
+        trace_id, trace_id_source = resolve_trace_id(body, request.headers)
         model_name = body.get("model", "")
         is_stream = body.get("stream", False)
 
-        # Map model name
-        model_entry = preset.resolve_model(model_name)
-        if model_entry:
-            body["model"] = model_entry.litellm_model
+        with request_log_context(trace_id):
+            log_debug("[REQ] Direct Chat Completions input", {
+                "trace_id_source": trace_id_source,
+                "model": model_name,
+                "stream": is_stream,
+            })
 
-        if is_stream:
-            try:
-                stream = await request_chat_completion(preset, body, model_name=model_name)
-            except Exception as exc:
-                error_code = litellm_error_status_code(exc)
-                error_msg = litellm_error_message(exc)
-                return JSONResponse(
-                    {"error": {"message": error_msg, "type": "upstream_error", "code": error_code}},
-                    status_code=error_code,
+            # Map model name
+            model_entry = preset.resolve_model(model_name)
+            if model_entry:
+                body["model"] = model_entry.litellm_model
+
+            if is_stream:
+                try:
+                    stream = await request_chat_completion(preset, body, model_name=model_name)
+                except Exception as exc:
+                    error_code = litellm_error_status_code(exc)
+                    error_msg = litellm_error_message(exc)
+                    log_debug("[ERR] Direct chat streaming backend error", {
+                        "status": error_code,
+                        "error": error_msg[:2000],
+                    })
+                    return JSONResponse(
+                        {"error": {"message": error_msg, "type": "upstream_error", "code": error_code}},
+                        status_code=error_code,
+                    )
+
+                async def stream_passthrough():
+                    with request_log_context(trace_id):
+                        try:
+                            async for chunk in serialize_completion_stream(stream):
+                                yield chunk
+                        except Exception as exc:
+                            error_payload = {
+                                "error": {
+                                    "message": litellm_error_message(exc),
+                                    "type": "upstream_error",
+                                    "code": litellm_error_status_code(exc),
+                                }
+                            }
+                            log_debug("[ERR] Direct chat streaming passthrough error", error_payload)
+                            yield f"data: {json.dumps(error_payload)}\n\n".encode("utf-8")
+
+                return StreamingResponse(
+                    stream_passthrough(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
                 )
 
-            async def stream_passthrough():
-                try:
-                    async for chunk in serialize_completion_stream(stream):
-                        yield chunk
-                except Exception as exc:
-                    error_payload = {
-                        "error": {
-                            "message": litellm_error_message(exc),
-                            "type": "upstream_error",
-                            "code": litellm_error_status_code(exc),
-                        }
-                    }
-                    yield f"data: {json.dumps(error_payload)}\n\n".encode("utf-8")
-
-            return StreamingResponse(
-                stream_passthrough(),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-            )
-        else:
             try:
                 resp = await request_chat_completion(preset, body, model_name=model_name)
             except Exception as exc:
                 error_code = litellm_error_status_code(exc)
                 error_msg = litellm_error_message(exc)
+                log_debug("[ERR] Direct chat backend error", {
+                    "status": error_code,
+                    "error": error_msg[:2000],
+                })
                 return JSONResponse(
                     {"error": {"message": error_msg, "type": "upstream_error", "code": error_code}},
                     status_code=error_code,
@@ -408,9 +386,7 @@ def start_proxy(
     debug: bool = False,
 ) -> None:
     """Start the proxy server (blocking)."""
-    # Always init debug logger — essential for diagnosing upstream errors
-    _init_debug_logger()
-    log_path = get_user_config_dir() / "debug.log"
+    log_path = init_logging(debug=debug)
 
     # Validate API key
     api_key = os.environ.get(preset.env_key)

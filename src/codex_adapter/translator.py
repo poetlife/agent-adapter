@@ -21,14 +21,12 @@ DeepSeek V4 thinking mode mapping:
 from __future__ import annotations
 
 import json
-import logging
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-# Best-effort import of proxy debug logger; translator can also be used standalone.
-_logger = logging.getLogger("codex_adapter.debug")
+from codex_adapter.logging_utils import log_warning
 
 
 @dataclass
@@ -583,10 +581,7 @@ async def translate_stream(
                 error_obj = chunk_data["error"]
                 error_msg = error_obj.get("message", "Unknown upstream error")
                 error_code = error_obj.get("code", "upstream_error")
-                _logger.warning(
-                    "[STREAM-ERR] In-stream error from backend:\n%s",
-                    json.dumps(chunk_data, ensure_ascii=False, indent=2),
-                )
+                log_warning("[STREAM-ERR] In-stream error from backend", chunk_data)
                 # Emit response.created if not yet emitted so Codex CLI sees
                 # the response lifecycle.
                 if not created_emitted:

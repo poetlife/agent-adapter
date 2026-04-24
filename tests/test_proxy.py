@@ -4,6 +4,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from codex_adapter.config import Preset
+from codex_adapter.logging_utils import get_current_trace_id
 from codex_adapter.proxy import create_app
 
 
@@ -87,6 +88,39 @@ class TestHealthEndpoint:
 
 
 class TestLiteLLMIntegration:
+    def test_responses_endpoint_binds_trace_id_to_log_context(self, client, monkeypatch):
+        captured_trace_ids = []
+
+        def fake_log_debug(message, _data=None):
+            if message == "[REQ] Responses API input":
+                captured_trace_ids.append(get_current_trace_id())
+
+        async def fake_request_chat_completion(preset, body, model_name=None):
+            return {
+                "id": "chatcmpl-1",
+                "model": "deepseek/deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hello from LiteLLM"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+            }
+
+        monkeypatch.setattr("codex_adapter.proxy.log_debug", fake_log_debug)
+        monkeypatch.setattr("codex_adapter.proxy.request_chat_completion", fake_request_chat_completion)
+        monkeypatch.setattr("codex_adapter.proxy.serialize_completion_response", lambda response: response)
+
+        resp = client.post(
+            "/v1/responses",
+            json={"model": "deepseek-chat", "input": "Hi", "metadata": {"trace_id": "trace-proxy-123"}},
+        )
+
+        assert resp.status_code == 200
+        assert captured_trace_ids == ["trace-proxy-123"]
+
     def test_responses_endpoint_uses_litellm_request_path(self, client, monkeypatch):
         captured = {}
 

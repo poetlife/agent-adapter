@@ -57,6 +57,12 @@
 | `install_unit(preset, port, ...)` | `deploy/systemd.py` | 安装/卸载 systemd unit 文件 | cli.py (service install-systemd) |
 | `start_via_systemd()` / `stop_via_systemd()` | `deploy/systemd.py` | 通过 systemctl 启动/停止服务 | cli.py (service install-systemd) |
 
+## 🪵 日志与追踪
+
+| 入口 | 所属模块 | 解决的问题 | 被谁使用 |
+|---|---|---|---|
+| `init_logging()` / `request_log_context()` / `resolve_trace_id()` / `log_*()` | `logging_utils.py` | 统一 Loguru 初始化、请求 trace id 提取与上下文日志输出 | proxy.py, translator.py |
+
 ## 🚧 已知潜在重复（需要关注）
 
 | 关注点 | 涉及位置 | 风险说明 |
