@@ -111,7 +111,6 @@ class TestLiteLLMIntegration:
 
         monkeypatch.setattr("entrypoints.responses_proxy.log_debug", fake_log_debug)
         monkeypatch.setattr("entrypoints.responses_proxy.request_chat_completion", fake_request_chat_completion)
-        monkeypatch.setattr("entrypoints.responses_proxy.serialize_completion_response", lambda response: response)
 
         resp = client.post(
             "/v1/responses",
@@ -142,7 +141,6 @@ class TestLiteLLMIntegration:
             }
 
         monkeypatch.setattr("entrypoints.responses_proxy.request_chat_completion", fake_request_chat_completion)
-        monkeypatch.setattr("entrypoints.responses_proxy.serialize_completion_response", lambda response: response)
 
         resp = client.post("/v1/responses", json={"model": "deepseek-chat", "input": "Hi"})
 
@@ -154,20 +152,16 @@ class TestLiteLLMIntegration:
 
     def test_streaming_responses_endpoint_translates_litellm_stream(self, client, monkeypatch):
         async def fake_request_chat_completion(preset, body, model_name=None):
-            return object()
+            return object()  # Placeholder; stream_chat_as_responses_sse is mocked below
 
-        async def fake_serialize_completion_stream(_response):
-            chunks = [
-                b'data: {"id":"chatcmpl-1","model":"deepseek/deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
-                b'data: {"id":"chatcmpl-1","model":"deepseek/deepseek-chat","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":null}]}\n\n',
-                b'data: {"id":"chatcmpl-1","model":"deepseek/deepseek-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
-                b"data: [DONE]\n\n",
-            ]
-            async for chunk in FakeSSEStream(chunks):
-                yield chunk
+        async def fake_stream_chat_as_responses_sse(stream, original_model=""):
+            """Produce Responses API SSE events directly."""
+            yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress","model":"deepseek-chat","output":[]}}\n\n'
+            yield b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"Hello!"}\n\n'
+            yield b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"deepseek-chat","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}],"output_text":"Hello!","status":"completed","usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}\n\n'
 
         monkeypatch.setattr("entrypoints.responses_proxy.request_chat_completion", fake_request_chat_completion)
-        monkeypatch.setattr("entrypoints.responses_proxy.serialize_completion_stream", fake_serialize_completion_stream)
+        monkeypatch.setattr("entrypoints.responses_proxy.stream_chat_as_responses_sse", fake_stream_chat_as_responses_sse)
 
         with client.stream("POST", "/v1/responses", json={"model": "deepseek-chat", "input": "Hi", "stream": True}) as resp:
             body = "".join(resp.iter_text())

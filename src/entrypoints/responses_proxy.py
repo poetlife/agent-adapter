@@ -28,6 +28,8 @@ from providers.litellm_client import (
     request_chat_completion,
     serialize_completion_response,
     serialize_completion_stream,
+    stream_chat_as_responses_sse,
+    transform_chat_to_responses,
 )
 from common.logging import (
     init_logging,
@@ -38,9 +40,7 @@ from common.logging import (
 from protocols.codex_model_catalog import generate_codex_model_catalog
 from protocols.responses_chat import (
     ModelConfig,
-    chat_response_to_responses,
     responses_request_to_chat,
-    translate_stream,
 )
 
 console = Console()
@@ -169,8 +169,7 @@ def create_app(preset: Preset) -> Starlette:
                     status_code=status_code,
                 )
 
-            chat_resp = serialize_completion_response(chat_resp)
-            responses_resp = chat_response_to_responses(chat_resp, original_model)
+            responses_resp = transform_chat_to_responses(chat_resp, original_model)
             return JSONResponse(responses_resp)
 
     async def _handle_streaming(chat_body: dict, original_model: str, trace_id: str) -> StreamingResponse:
@@ -181,7 +180,7 @@ def create_app(preset: Preset) -> Starlette:
             with request_log_context(trace_id):
                 try:
                     stream = await request_chat_completion(preset, chat_body, model_name=original_model)
-                    async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
+                    async for chunk in stream_chat_as_responses_sse(stream, original_model):
                         yield chunk
                     return
                 except Exception as exc:
@@ -189,7 +188,7 @@ def create_app(preset: Preset) -> Starlette:
                         chat_body = _strip_reasoning_for_retry(chat_body)
                         try:
                             stream = await request_chat_completion(preset, chat_body, model_name=original_model)
-                            async for chunk in translate_stream(serialize_completion_stream(stream), original_model):
+                            async for chunk in stream_chat_as_responses_sse(stream, original_model):
                                 yield chunk
                             return
                         except Exception as retry_exc:

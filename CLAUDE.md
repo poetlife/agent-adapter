@@ -37,15 +37,15 @@ uv run codex-adapter service stop
 ## Architecture
 
 ```
-Codex CLI → POST /v1/responses → proxy.py → translator.py → litellm_client.py → LiteLLM SDK → DeepSeek
-                                                            ← translates response back ←
+Codex CLI → POST /v1/responses → proxy.py → responses_chat.py (请求翻译) → litellm_client.py → LiteLLM SDK → DeepSeek
+                                             litellm_client.py (响应翻译，委托 LiteLLM 内置转换器) ←
 ```
 
 **Core data flow** (3 files to understand):
 
 - **`proxy.py`** — Starlette ASGI app with 4 routes. Receives requests, calls translator, then dispatches via the shared LiteLLM client. Handles both streaming and non-streaming.
-- **`translator.py`** — The heart of the project (~530 lines). `responses_request_to_chat()` converts inbound requests, `chat_response_to_responses()` converts responses, `translate_stream()` handles SSE event-by-event translation. Also maps Codex `reasoning.effort` → DeepSeek `thinking` params.
-- **`litellm_client.py`** — The single upstream call path. Builds LiteLLM kwargs from preset data, executes async chat completions, and normalizes regular/streaming responses plus error metadata.
+- **`responses_chat.py`** — Request-side translation (~380 lines). `responses_request_to_chat()` converts inbound Responses API requests to Chat Completions format, with DeepSeek-specific handling: thinking mode mapping, reasoning carry-forward across tool calls, consecutive assistant message merging.
+- **`litellm_client.py`** — The single upstream call path. Builds LiteLLM kwargs from preset data, executes async chat completions, normalizes error metadata, and translates responses back to Responses API format via LiteLLM's built-in `LiteLLMCompletionResponsesConfig` (with Codex CLI compatibility post-processing).
 - **`config.py`** — Preset system. `Preset` and `ModelEntry` dataclasses loaded from YAML files. Built-in presets live in `presets/deepseek.yaml`, user custom presets in `~/.config/codex-adapter/presets/`.
 
 **CLI layer** (`cli.py`): Click-based. Commands: `start`, `list`, `setup`, `deploy`, `service` (group with start/stop/restart/status/logs/install-systemd).

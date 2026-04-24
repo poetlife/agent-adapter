@@ -6,7 +6,7 @@
 
 核心链路：
 
-`entrypoints` -> `protocols` -> `providers.litellm_client` -> `DeepSeek / Hunyuan / other providers`
+`entrypoints` -> `protocols`（请求翻译）-> `providers.litellm_client`（请求 + 响应翻译）-> `DeepSeek / Hunyuan / other providers`
 
 `codex_adapter` 只负责 Codex 场景下的 CLI、setup 和 deploy。
 
@@ -19,10 +19,10 @@ src/
     runtime_paths.py      # 公共运行时路径
   providers/
     catalog.py            # Preset / ModelEntry / 预设加载
-    litellm_client.py     # 统一 LiteLLM 请求入口
+    litellm_client.py     # 统一 LiteLLM 请求入口 + 响应翻译（Chat→Responses，委托 LiteLLM 内置转换器）
     presets/              # 内置 provider 预设 YAML
   protocols/
-    responses_chat.py     # Responses API <-> Chat Completions 转换
+    responses_chat.py     # Responses API → Chat Completions 请求翻译（含 DeepSeek thinking 定制）
     codex_model_catalog.py# Codex 模型目录输出
   entrypoints/
     responses_proxy.py    # HTTP 入口和请求生命周期
@@ -45,7 +45,8 @@ src/
 - provider 预设结构与加载入口：`providers.catalog`
 - 统一日志与 trace id：`common.logging`
 - 上游 LiteLLM 调用：`providers.litellm_client`
-- Responses/Chat 协议转换：`protocols.responses_chat`
+- Responses→Chat 请求翻译（含 DeepSeek thinking 定制）：`protocols.responses_chat`
+- Chat→Responses 响应翻译（委托 LiteLLM 内置转换器）：`providers.litellm_client`
 - Codex 模型目录：`protocols.codex_model_catalog`
 
 ## Migration Notes

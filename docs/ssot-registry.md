@@ -20,7 +20,9 @@
 | 入口 | 所属模块 | 解决的问题 | 被谁使用 |
 |---|---|---|---|
 | `ModelConfig` | `protocols.responses_chat` | Responses -> Chat 转换时的 thinking 配置结构 | entrypoints.responses_proxy |
-| `responses_request_to_chat()` / `chat_response_to_responses()` / `translate_stream()` | `protocols.responses_chat` | Responses API 与 Chat Completions 的双向转换 | entrypoints.responses_proxy |
+| `responses_request_to_chat()` | `protocols.responses_chat` | Responses API → Chat Completions 请求翻译（含 DeepSeek thinking 定制、reasoning carry-forward） | entrypoints.responses_proxy |
+| `transform_chat_to_responses()` | `providers.litellm_client` | Chat Completions → Responses API 响应翻译（委托 LiteLLM 内置 `LiteLLMCompletionResponsesConfig`，加 Codex 格式修正） | entrypoints.responses_proxy |
+| `stream_chat_as_responses_sse()` | `providers.litellm_client` | Chat Completions 流 → Responses API SSE 事件流（委托 LiteLLM `LiteLLMCompletionStreamingIterator`） | entrypoints.responses_proxy |
 | `generate_codex_model_catalog()` | `protocols.codex_model_catalog` | 生成 Codex CLI 兼容的模型目录输出，避免 setup/proxy 各写一份 | codex_setup, entrypoints.responses_proxy |
 | `create_app()` / `start_proxy()` | `entrypoints.responses_proxy` | HTTP 入口、请求生命周期、错误包装、SSE 输出 | cli |
 

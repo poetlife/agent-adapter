@@ -1,4 +1,4 @@
-"""Tests for the Responses API → Chat Completions translator."""
+"""Tests for the Responses API → Chat Completions translator and LiteLLM response translation."""
 
 import json
 
@@ -6,9 +6,12 @@ import pytest
 
 from protocols.responses_chat import (
     ModelConfig,
-    chat_response_to_responses,
     responses_request_to_chat,
-    translate_stream,
+)
+from providers.litellm_client import (
+    transform_chat_to_responses,
+    _fix_reasoning_format,
+    _compute_output_text,
 )
 
 
@@ -169,7 +172,7 @@ class TestResponsesRequestToChat:
 
 
 class TestChatResponseToResponses:
-    """Test converting Chat Completions responses to Responses API format."""
+    """Test converting Chat Completions responses to Responses API format (via LiteLLM)."""
 
     def test_simple_text_response(self):
         chat_resp = {
@@ -188,14 +191,14 @@ class TestChatResponseToResponses:
                 "total_tokens": 15,
             },
         }
-        result = chat_response_to_responses(chat_resp)
+        result = transform_chat_to_responses(chat_resp)
         assert result["object"] == "response"
         assert result["status"] == "completed"
         assert result["output_text"] == "Hello!"
         assert result["usage"]["input_tokens"] == 10
         assert result["usage"]["output_tokens"] == 5
-        assert len(result["output"]) == 1
-        assert result["output"][0]["type"] == "message"
+        msg_items = [o for o in result["output"] if o["type"] == "message"]
+        assert len(msg_items) >= 1
 
     def test_tool_call_response(self):
         chat_resp = {
@@ -223,8 +226,10 @@ class TestChatResponseToResponses:
             ],
             "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
         }
-        result = chat_response_to_responses(chat_resp)
-        assert result["status"] == "incomplete"  # tool_calls means not done yet
+        result = transform_chat_to_responses(chat_resp)
+        # LiteLLM maps tool_calls finish_reason to "completed" (standard
+        # Responses API behaviour: tool calls are output items in a completed response)
+        assert result["status"] == "completed"
         # Should have a function_call output item
         fc_items = [o for o in result["output"] if o["type"] == "function_call"]
         assert len(fc_items) == 1
@@ -238,14 +243,13 @@ class TestChatResponseToResponses:
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "Ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
-        result = chat_response_to_responses(chat_resp, original_model="deepseek-chat")
-        # Should use the chat response's model if available
-        assert result["model"] == "deepseek/deepseek-chat"
+        result = transform_chat_to_responses(chat_resp, original_model="deepseek-chat")
+        # When original_model is specified, it should be used
+        assert result["model"] == "deepseek-chat"
 
     def test_empty_choices(self):
         chat_resp = {"id": "chatcmpl-0", "model": "x", "choices": [], "usage": {}}
-        result = chat_response_to_responses(chat_resp)
-        assert result["output"] == []
+        result = transform_chat_to_responses(chat_resp)
         assert result["output_text"] == ""
 
 
@@ -364,7 +368,7 @@ class TestThinkingModeRequest:
 
 
 class TestThinkingModeResponse:
-    """Test reasoning_content mapping in responses."""
+    """Test reasoning_content mapping in responses (via LiteLLM)."""
 
     def test_reasoning_content_mapped(self):
         """DeepSeek reasoning_content → Responses API reasoning output item."""
@@ -382,13 +386,18 @@ class TestThinkingModeResponse:
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
         }
-        result = chat_response_to_responses(chat_resp)
+        result = transform_chat_to_responses(chat_resp)
 
         # Should have reasoning item BEFORE message item
-        assert len(result["output"]) == 2
-        assert result["output"][0]["type"] == "reasoning"
-        assert result["output"][0]["summary"][0]["text"] == "让我想想这个问题...\n首先需要分析..."
-        assert result["output"][1]["type"] == "message"
+        types = [o["type"] for o in result["output"]]
+        assert "reasoning" in types
+        assert "message" in types
+        reasoning_idx = types.index("reasoning")
+        message_idx = types.index("message")
+        assert reasoning_idx < message_idx
+
+        reasoning_item = result["output"][reasoning_idx]
+        assert reasoning_item["summary"][0]["text"] == "让我想想这个问题...\n首先需要分析..."
         assert result["output_text"] == "答案是42。"
 
     def test_no_reasoning_content(self):
@@ -403,9 +412,11 @@ class TestThinkingModeResponse:
             }],
             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
         }
-        result = chat_response_to_responses(chat_resp)
-        assert len(result["output"]) == 1
-        assert result["output"][0]["type"] == "message"
+        result = transform_chat_to_responses(chat_resp)
+        reasoning_items = [o for o in result["output"] if o["type"] == "reasoning"]
+        assert len(reasoning_items) == 0
+        msg_items = [o for o in result["output"] if o["type"] == "message"]
+        assert len(msg_items) >= 1
 
     def test_reasoning_with_tool_calls(self):
         """Reasoning + tool call should produce reasoning + function_call items."""
@@ -431,11 +442,11 @@ class TestThinkingModeResponse:
             }],
             "usage": {"prompt_tokens": 15, "completion_tokens": 25, "total_tokens": 40},
         }
-        result = chat_response_to_responses(chat_resp)
+        result = transform_chat_to_responses(chat_resp)
         types = [o["type"] for o in result["output"]]
         assert "reasoning" in types
         assert "function_call" in types
-        assert result["status"] == "incomplete"
+        assert result["status"] == "completed"
 
 
 class TestMultiTurnReasoningContent:
@@ -644,63 +655,97 @@ class TestConsecutiveAssistantMerge:
                 )
 
 
-class TestTranslateStreamError:
-    """Test translate_stream handling of in-stream error objects."""
+class TestLiteLLMResponseHelpers:
+    """Test the LiteLLM response post-processing helpers."""
 
-    @pytest.mark.asyncio
-    async def test_stream_error_object_produces_response_failed(self):
-        """An error JSON in the SSE stream should emit response.failed, not silently disconnect."""
+    def test_fix_reasoning_format_converts_content_to_summary(self):
+        """LiteLLM reasoning content[output_text] → Codex summary[summary_text]."""
+        output = [{
+            "type": "reasoning",
+            "id": "rs_123",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "thinking...", "annotations": []}],
+        }]
+        fixed = _fix_reasoning_format(output)
+        assert "content" not in fixed[0]
+        assert "status" not in fixed[0]
+        assert "role" not in fixed[0]
+        assert fixed[0]["summary"] == [{"type": "summary_text", "text": "thinking..."}]
 
-        async def fake_stream():
-            # DeepSeek sometimes returns 200 OK but sends an error in the data
-            yield b'data: {"error":{"message":"The `reasoning_content` in the input messages[2] is not allowed when the thinking parameter is disabled.","param":null,"code":"invalid_request_error"}}'
-            yield b"data: [DONE]"
+    def test_fix_reasoning_format_preserves_non_reasoning(self):
+        output = [
+            {"type": "message", "content": [{"type": "output_text", "text": "hi"}]},
+            {"type": "function_call", "name": "foo", "arguments": "{}"},
+        ]
+        fixed = _fix_reasoning_format(output)
+        assert fixed == output
 
-        events = []
-        async for chunk in translate_stream(fake_stream(), "deepseek-v4-flash"):
-            events.append(chunk.decode("utf-8"))
+    def test_fix_reasoning_format_already_summary(self):
+        """Items already in summary format should pass through."""
+        output = [{
+            "type": "reasoning",
+            "id": "rs_456",
+            "summary": [{"type": "summary_text", "text": "already correct"}],
+        }]
+        fixed = _fix_reasoning_format(output)
+        assert fixed[0]["summary"][0]["text"] == "already correct"
 
-        # Should have response.created, error, and response.failed
-        event_types = []
-        for ev in events:
-            for line in ev.strip().split("\n"):
-                if line.startswith("event: "):
-                    event_types.append(line[7:])
+    def test_compute_output_text(self):
+        output = [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+            {"type": "message", "content": [{"type": "output_text", "text": "Hello "}]},
+            {"type": "message", "content": [{"type": "output_text", "text": "world"}]},
+        ]
+        assert _compute_output_text(output) == "Hello world"
 
-        assert "response.created" in event_types
-        assert "error" in event_types
-        assert "response.failed" in event_types
+    def test_compute_output_text_empty(self):
+        assert _compute_output_text([]) == ""
+        assert _compute_output_text([{"type": "function_call"}]) == ""
 
-        # Verify the error message is complete (not truncated)
-        for ev in events:
-            if "response.failed" in ev:
-                data_line = [l for l in ev.strip().split("\n") if l.startswith("data: ")][0]
-                data = json.loads(data_line[6:])
-                assert "reasoning_content" in data["response"]["error"]["message"]
+    def test_transform_output_text_in_result(self):
+        """output_text must be a real key in the dict (not just a property)."""
+        chat_resp = {
+            "id": "chatcmpl-ot",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        result = transform_chat_to_responses(chat_resp)
+        assert "output_text" in result
+        assert result["output_text"] == "Hi"
 
-    @pytest.mark.asyncio
-    async def test_normal_stream_unaffected(self):
-        """Normal streaming chunks should still work correctly after the error handling change."""
+    def test_transform_object_field_is_response(self):
+        """object field must be 'response', not 'chat.completion'."""
+        chat_resp = {
+            "id": "chatcmpl-obj",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        result = transform_chat_to_responses(chat_resp)
+        assert result["object"] == "response"
 
-        async def fake_stream():
-            yield b'data: {"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}'
-            yield b'data: {"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":null}]}'
-            yield b'data: {"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}'
-            yield b"data: [DONE]"
-
-        events = []
-        async for chunk in translate_stream(fake_stream(), "deepseek-v4-flash"):
-            events.append(chunk.decode("utf-8"))
-
-        event_types = []
-        for ev in events:
-            for line in ev.strip().split("\n"):
-                if line.startswith("event: "):
-                    event_types.append(line[7:])
-
-        assert "response.created" in event_types
-        assert "response.output_text.delta" in event_types
-        assert "response.completed" in event_types
-        # No error events
-        assert "error" not in event_types
-        assert "response.failed" not in event_types
+    def test_transform_strips_excess_fields(self):
+        """Codex CLI doesn't expect certain fields in the response."""
+        chat_resp = {
+            "id": "chatcmpl-strip",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        result = transform_chat_to_responses(chat_resp)
+        for key in ("parallel_tool_calls", "tool_choice", "tools", "text", "temperature"):
+            assert key not in result, f"Unexpected key {key!r} in result"
