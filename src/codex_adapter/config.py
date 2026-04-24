@@ -17,7 +17,12 @@ class ModelEntry:
     name: str
     litellm_model: str
     api_base: str
-    max_tokens: int = 4096
+    max_tokens: int = 8192
+    context_length: int = 128000
+    description: str = ""
+    supports_thinking: bool = False
+    default_thinking: str = "disabled"   # "enabled" or "disabled"
+    reasoning_effort: str = "high"       # "high" or "max"
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -32,13 +37,23 @@ class Preset:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Preset:
+        _known_model_keys = {
+            "name", "litellm_model", "api_base", "max_tokens",
+            "context_length", "description",
+            "supports_thinking", "default_thinking", "reasoning_effort",
+        }
         models = [
             ModelEntry(
                 name=m["name"],
                 litellm_model=m["litellm_model"],
-                api_base=m["api_base"],
-                max_tokens=m.get("max_tokens", 4096),
-                extra={k: v for k, v in m.items() if k not in ("name", "litellm_model", "api_base", "max_tokens")},
+                api_base=m.get("api_base", data.get("api_base", "")),
+                max_tokens=m.get("max_tokens", 8192),
+                context_length=m.get("context_length", 128000),
+                description=m.get("description", ""),
+                supports_thinking=m.get("supports_thinking", False),
+                default_thinking=m.get("default_thinking", "disabled"),
+                reasoning_effort=m.get("reasoning_effort", "high"),
+                extra={k: v for k, v in m.items() if k not in _known_model_keys},
             )
             for m in data["models"]
         ]

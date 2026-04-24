@@ -5,6 +5,7 @@ import json
 import pytest
 
 from codex_adapter.translator import (
+    ModelConfig,
     chat_response_to_responses,
     responses_request_to_chat,
 )
@@ -245,3 +246,192 @@ class TestChatResponseToResponses:
         result = chat_response_to_responses(chat_resp)
         assert result["output"] == []
         assert result["output_text"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Thinking mode tests (DeepSeek V4)
+# ---------------------------------------------------------------------------
+
+THINKING_MODEL = ModelConfig(
+    supports_thinking=True,
+    default_thinking="enabled",
+    reasoning_effort="high",
+)
+
+NON_THINKING_MODEL = ModelConfig(
+    supports_thinking=False,
+    default_thinking="disabled",
+    reasoning_effort="high",
+)
+
+
+class TestThinkingModeRequest:
+    """Test thinking mode translation in requests."""
+
+    def test_default_thinking_enabled(self):
+        """Model with default_thinking=enabled should add thinking params."""
+        body = {"model": "deepseek-v4-flash", "input": "Hi"}
+        result = responses_request_to_chat(body, model_config=THINKING_MODEL)
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["reasoning_effort"] == "high"
+        # temperature should NOT be present when thinking is enabled
+        assert "temperature" not in result
+
+    def test_reasoning_effort_high(self):
+        """Codex reasoning.effort=high → DeepSeek reasoning_effort=high."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": "Hi",
+            "reasoning": {"effort": "high"},
+        }
+        result = responses_request_to_chat(body, model_config=THINKING_MODEL)
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["reasoning_effort"] == "high"
+
+    def test_reasoning_effort_max(self):
+        """Codex reasoning.effort=max → DeepSeek reasoning_effort=max."""
+        body = {
+            "model": "deepseek-v4-pro",
+            "input": "Complex problem",
+            "reasoning": {"effort": "max"},
+        }
+        result = responses_request_to_chat(body, model_config=THINKING_MODEL)
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["reasoning_effort"] == "max"
+
+    def test_reasoning_effort_low_maps_to_high(self):
+        """Codex reasoning.effort=low → DeepSeek reasoning_effort=high (lowest available)."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": "Hi",
+            "reasoning": {"effort": "low"},
+        }
+        result = responses_request_to_chat(body, model_config=THINKING_MODEL)
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["reasoning_effort"] == "high"
+
+    def test_reasoning_effort_medium_maps_to_high(self):
+        """Codex reasoning.effort=medium → DeepSeek reasoning_effort=high."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": "Hi",
+            "reasoning": {"effort": "medium"},
+        }
+        result = responses_request_to_chat(body, model_config=THINKING_MODEL)
+        assert result["reasoning_effort"] == "high"
+
+    def test_thinking_drops_temperature(self):
+        """When thinking is enabled, temperature/top_p should NOT be sent."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": "Hi",
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "reasoning": {"effort": "high"},
+        }
+        result = responses_request_to_chat(body, model_config=THINKING_MODEL)
+        assert "temperature" not in result
+        assert "top_p" not in result
+
+    def test_non_thinking_model_ignores_reasoning(self):
+        """Non-thinking model should pass temperature through normally."""
+        body = {
+            "model": "some-model",
+            "input": "Hi",
+            "temperature": 0.7,
+        }
+        result = responses_request_to_chat(body, model_config=NON_THINKING_MODEL)
+        assert result["temperature"] == 0.7
+        assert "thinking" not in result
+        assert "reasoning_effort" not in result
+
+    def test_thinking_disabled_allows_temperature(self):
+        """Thinking model without reasoning param and default disabled → temperature ok."""
+        model_cfg = ModelConfig(
+            supports_thinking=True,
+            default_thinking="disabled",
+            reasoning_effort="high",
+        )
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": "Hi",
+            "temperature": 0.5,
+        }
+        result = responses_request_to_chat(body, model_config=model_cfg)
+        assert result["thinking"] == {"type": "disabled"}
+        assert result["temperature"] == 0.5
+
+
+class TestThinkingModeResponse:
+    """Test reasoning_content mapping in responses."""
+
+    def test_reasoning_content_mapped(self):
+        """DeepSeek reasoning_content → Responses API reasoning output item."""
+        chat_resp = {
+            "id": "chatcmpl-123",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "让我想想这个问题...\n首先需要分析...",
+                    "content": "答案是42。",
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60},
+        }
+        result = chat_response_to_responses(chat_resp)
+
+        # Should have reasoning item BEFORE message item
+        assert len(result["output"]) == 2
+        assert result["output"][0]["type"] == "reasoning"
+        assert result["output"][0]["summary"][0]["text"] == "让我想想这个问题...\n首先需要分析..."
+        assert result["output"][1]["type"] == "message"
+        assert result["output_text"] == "答案是42。"
+
+    def test_no_reasoning_content(self):
+        """Without reasoning_content, no reasoning output item."""
+        chat_resp = {
+            "id": "chatcmpl-456",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello!"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        }
+        result = chat_response_to_responses(chat_resp)
+        assert len(result["output"]) == 1
+        assert result["output"][0]["type"] == "message"
+
+    def test_reasoning_with_tool_calls(self):
+        """Reasoning + tool call should produce reasoning + function_call items."""
+        chat_resp = {
+            "id": "chatcmpl-789",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "需要查询天气信息...",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_xyz",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city":"Beijing"}',
+                        },
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 25, "total_tokens": 40},
+        }
+        result = chat_response_to_responses(chat_resp)
+        types = [o["type"] for o in result["output"]]
+        assert "reasoning" in types
+        assert "function_call" in types
+        assert result["status"] == "incomplete"

@@ -26,6 +26,7 @@ from starlette.routing import Route
 
 from codex_adapter.config import Preset, get_user_config_dir
 from codex_adapter.translator import (
+    ModelConfig,
     chat_response_to_responses,
     responses_request_to_chat,
     translate_stream,
@@ -70,14 +71,28 @@ def create_app(preset: Preset) -> Starlette:
         model_name = body.get("model", "")
         is_stream = body.get("stream", False)
 
-        # Translate Responses API request → Chat Completions request
-        chat_body = responses_request_to_chat(body)
-
-        # Map model name to litellm_model identifier
+        # Find matching model entry for thinking config
+        model_entry = None
         for m in preset.models:
             if m.name == model_name:
-                chat_body["model"] = m.litellm_model
+                model_entry = m
                 break
+        if model_entry is None and preset.models:
+            model_entry = preset.models[0]
+
+        # Build model config for translator
+        model_config = ModelConfig(
+            supports_thinking=model_entry.supports_thinking if model_entry else False,
+            default_thinking=model_entry.default_thinking if model_entry else "disabled",
+            reasoning_effort=model_entry.reasoning_effort if model_entry else "high",
+        )
+
+        # Translate Responses API request → Chat Completions request
+        chat_body = responses_request_to_chat(body, model_config=model_config)
+
+        # Map model name to litellm_model identifier
+        if model_entry:
+            chat_body["model"] = model_entry.litellm_model
 
         # Build backend request
         backend_url = _build_backend_url(preset, model_name)

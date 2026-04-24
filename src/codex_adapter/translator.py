@@ -4,9 +4,18 @@ Codex CLI (latest) sends requests to POST /v1/responses (Responses API).
 DeepSeek and most non-OpenAI providers only support POST /v1/chat/completions.
 
 This module converts:
-  Responses API request  →  Chat Completions request
-  Chat Completions response  →  Responses API response
+  Responses API request  →  Chat Completions request  (with DeepSeek thinking support)
+  Chat Completions response  →  Responses API response  (with reasoning_content mapping)
   Chat Completions SSE stream  →  Responses API SSE stream
+
+DeepSeek V4 thinking mode mapping:
+  Codex reasoning.effort  →  DeepSeek thinking.type + reasoning_effort
+    "low" / "medium"      →  thinking.type="enabled", reasoning_effort="high"
+    "high"                →  thinking.type="enabled", reasoning_effort="high"
+    "max"                 →  thinking.type="enabled", reasoning_effort="max"
+    (absent)              →  use model preset defaults
+
+  DeepSeek reasoning_content  →  Codex reasoning output item
 """
 
 from __future__ import annotations
@@ -14,14 +23,27 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
+
+
+@dataclass
+class ModelConfig:
+    """Per-model config passed to translation functions for thinking support."""
+
+    supports_thinking: bool = False
+    default_thinking: str = "disabled"   # "enabled" or "disabled"
+    reasoning_effort: str = "high"       # "high" or "max"
 
 
 # ---------------------------------------------------------------------------
 # Request translation: Responses API → Chat Completions
 # ---------------------------------------------------------------------------
 
-def responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
+def responses_request_to_chat(
+    body: dict[str, Any],
+    model_config: ModelConfig | None = None,
+) -> dict[str, Any]:
     """Convert a Responses API request body into a Chat Completions request body.
 
     Responses API fields → Chat Completions mapping:
@@ -30,10 +52,14 @@ def responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
         input (list)      → messages array (with role mapping)
         max_output_tokens → max_tokens
         model             → model
-        temperature       → temperature
+        temperature       → temperature (dropped when thinking is enabled)
         tools             → tools (function format)
         stream            → stream
+        reasoning.effort  → thinking + reasoning_effort (DeepSeek V4)
     """
+    if model_config is None:
+        model_config = ModelConfig()
+
     messages: list[dict[str, Any]] = []
 
     # System message from 'instructions'
@@ -58,13 +84,48 @@ def responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
     if "max_output_tokens" in body:
         chat_body["max_tokens"] = body["max_output_tokens"]
 
-    # Temperature
-    if "temperature" in body:
-        chat_body["temperature"] = body["temperature"]
+    # --- Thinking mode translation ---
+    thinking_enabled = False
+    ds_reasoning_effort = model_config.reasoning_effort
 
-    # Top-p
-    if "top_p" in body:
-        chat_body["top_p"] = body["top_p"]
+    # Check Codex's reasoning.effort parameter
+    reasoning = body.get("reasoning")
+    if reasoning and isinstance(reasoning, dict):
+        effort = reasoning.get("effort", "")
+        if effort:
+            thinking_enabled = True
+            # Map Codex effort levels to DeepSeek reasoning_effort
+            # DeepSeek only supports "high" and "max"; low/medium map to high
+            if effort in ("low", "medium", "high"):
+                ds_reasoning_effort = "high"
+            elif effort in ("max", "xhigh"):
+                ds_reasoning_effort = "max"
+            else:
+                ds_reasoning_effort = "high"
+    elif model_config.supports_thinking and model_config.default_thinking == "enabled":
+        # Use model preset defaults if no explicit reasoning param
+        thinking_enabled = True
+
+    if model_config.supports_thinking:
+        if thinking_enabled:
+            chat_body["thinking"] = {"type": "enabled"}
+            chat_body["reasoning_effort"] = ds_reasoning_effort
+            # DeepSeek 不支持 temperature/top_p 在思考模式下
+            # 所以不传这些参数
+        else:
+            chat_body["thinking"] = {"type": "disabled"}
+            # Temperature (only when thinking is disabled)
+            if "temperature" in body:
+                chat_body["temperature"] = body["temperature"]
+            # Top-p
+            if "top_p" in body:
+                chat_body["top_p"] = body["top_p"]
+    else:
+        # Non-thinking model: pass through temperature/top_p normally
+        if "temperature" in body:
+            chat_body["temperature"] = body["temperature"]
+        if "top_p" in body:
+            chat_body["top_p"] = body["top_p"]
 
     # Stream
     if body.get("stream", False):
@@ -86,7 +147,11 @@ def responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert Responses API input items to Chat Completions messages."""
+    """Convert Responses API input items to Chat Completions messages.
+
+    Also handles reasoning_content from previous assistant turns for DeepSeek
+    multi-turn tool-call conversations.
+    """
     messages: list[dict[str, Any]] = []
 
     for item in items:
@@ -98,11 +163,24 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             content = item.get("content", "")
             if isinstance(content, list):
                 content = _convert_content_parts(content)
-            messages.append({"role": role, "content": content})
+            msg: dict[str, Any] = {"role": role, "content": content}
+            # Preserve reasoning_content for multi-turn context (DeepSeek requirement)
+            if "reasoning_content" in item:
+                msg["reasoning_content"] = item["reasoning_content"]
+            messages.append(msg)
+
+        elif item_type == "reasoning":
+            # Codex may send reasoning output back as input for context
+            # Map to assistant message with reasoning_content for DeepSeek
+            messages.append({
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": item.get("text", item.get("content", "")),
+            })
 
         elif item_type == "function_call":
             # Tool call from previous turn (assistant message with tool_calls)
-            messages.append({
+            msg = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [{
@@ -113,7 +191,11 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "arguments": item.get("arguments", "{}"),
                     },
                 }],
-            })
+            }
+            # Preserve reasoning_content for tool-call context chains
+            if "reasoning_content" in item:
+                msg["reasoning_content"] = item["reasoning_content"]
+            messages.append(msg)
 
         elif item_type == "function_call_output":
             # Tool result
@@ -185,7 +267,13 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def chat_response_to_responses(chat_resp: dict[str, Any], original_model: str = "") -> dict[str, Any]:
-    """Convert a Chat Completions response to a Responses API response."""
+    """Convert a Chat Completions response to a Responses API response.
+
+    Handles DeepSeek's reasoning_content field:
+      - reasoning_content from the assistant message is mapped to a
+        "reasoning" output item in the Responses API format, placed
+        before the text message output.
+    """
     resp_id = f"resp_{uuid.uuid4().hex[:24]}"
     output: list[dict[str, Any]] = []
 
@@ -194,7 +282,18 @@ def chat_response_to_responses(chat_resp: dict[str, Any], original_model: str = 
         message = choice.get("message", {})
         role = message.get("role", "assistant")
         content = message.get("content")
+        reasoning_content = message.get("reasoning_content")
         tool_calls = message.get("tool_calls")
+
+        # Reasoning/thinking output (DeepSeek V4)
+        if reasoning_content:
+            output.append({
+                "type": "reasoning",
+                "id": f"rs_{uuid.uuid4().hex[:24]}",
+                "summary": [
+                    {"type": "summary_text", "text": reasoning_content}
+                ],
+            })
 
         # Text output
         if content is not None:
@@ -261,36 +360,21 @@ async def translate_stream(
 ) -> AsyncIterator[bytes]:
     """Translate a Chat Completions SSE stream to Responses API SSE events.
 
-    Chat Completions stream format:
-        data: {"choices":[{"delta":{"content":"Hello"}}]}
-        data: [DONE]
-
-    Responses API stream format:
-        event: response.created
-        data: {"id":"resp_xxx","object":"response","status":"in_progress"}
-
-        event: response.output_item.added
-        data: {"type":"message",...}
-
-        event: response.content_part.added
-        data: {"type":"output_text","text":""}
-
-        event: response.output_text.delta
-        data: {"type":"output_text","delta":"Hello"}
-
-        event: response.completed
-        data: {"id":"resp_xxx","output":[...],"status":"completed"}
-
-        event: response.done
-        data: [DONE]
+    Handles DeepSeek's reasoning_content streaming:
+      - reasoning_content deltas → response.reasoning.delta events
+      - content deltas → response.output_text.delta events (as before)
     """
     resp_id = f"resp_{uuid.uuid4().hex[:24]}"
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    reasoning_id = f"rs_{uuid.uuid4().hex[:24]}"
     accumulated_text = ""
+    accumulated_reasoning = ""
     accumulated_tool_calls: dict[int, dict[str, Any]] = {}  # index → partial tool call
     model = original_model
     usage: dict[str, Any] = {}
     created_emitted = False
+    reasoning_part_emitted = False
+    text_part_emitted = False
 
     async for raw_chunk in chat_stream:
         line = raw_chunk.decode("utf-8", errors="replace").strip() if isinstance(raw_chunk, bytes) else raw_chunk.strip()
@@ -311,6 +395,12 @@ async def translate_stream(
             if data_str.strip() == "[DONE]":
                 # Emit final completed event
                 final_output: list[dict[str, Any]] = []
+                if accumulated_reasoning:
+                    final_output.append({
+                        "type": "reasoning",
+                        "id": reasoning_id,
+                        "summary": [{"type": "summary_text", "text": accumulated_reasoning}],
+                    })
                 if accumulated_text:
                     final_output.append({
                         "type": "message",
@@ -363,18 +453,6 @@ async def translate_stream(
                 }
                 yield _sse_event("response.created", created_event)
 
-                # Emit output_item.added for the message
-                yield _sse_event("response.output_item.added", {
-                    "type": "message",
-                    "id": msg_id,
-                    "role": "assistant",
-                    "content": [],
-                })
-                yield _sse_event("response.content_part.added", {
-                    "type": "output_text",
-                    "text": "",
-                })
-
             # Extract choices
             choices = chunk_data.get("choices", [])
 
@@ -390,9 +468,37 @@ async def translate_stream(
             for choice in choices:
                 delta = choice.get("delta", {})
 
+                # Reasoning content delta (DeepSeek V4 thinking)
+                reasoning_delta = delta.get("reasoning_content")
+                if reasoning_delta:
+                    if not reasoning_part_emitted:
+                        reasoning_part_emitted = True
+                        yield _sse_event("response.output_item.added", {
+                            "type": "reasoning",
+                            "id": reasoning_id,
+                            "summary": [],
+                        })
+                    accumulated_reasoning += reasoning_delta
+                    yield _sse_event("response.reasoning.delta", {
+                        "type": "reasoning",
+                        "delta": reasoning_delta,
+                    })
+
                 # Text content delta
                 text_delta = delta.get("content")
                 if text_delta:
+                    if not text_part_emitted:
+                        text_part_emitted = True
+                        yield _sse_event("response.output_item.added", {
+                            "type": "message",
+                            "id": msg_id,
+                            "role": "assistant",
+                            "content": [],
+                        })
+                        yield _sse_event("response.content_part.added", {
+                            "type": "output_text",
+                            "text": "",
+                        })
                     accumulated_text += text_delta
                     yield _sse_event("response.output_text.delta", {
                         "type": "output_text",

@@ -22,8 +22,10 @@ POST /v1/responses    →      接收 Responses API 请求
 - `instructions` ↔ system message
 - `input` ↔ messages 数组
 - `max_output_tokens` ↔ `max_tokens`
+- `reasoning.effort` → DeepSeek `thinking` + `reasoning_effort`（思考深度控制）
+- DeepSeek `reasoning_content` → Responses API `reasoning` 输出项（思维链）
 - function tool calls 双向映射
-- SSE 流式事件格式完整转换
+- SSE 流式事件格式完整转换（含 reasoning_content 流式翻译）
 
 ## 快速开始
 
@@ -41,7 +43,7 @@ uv run codex-adapter start --preset deepseek
 # 4. 在另一个终端中使用 Codex CLI（原生 Responses API 模式）
 export OPENAI_BASE_URL=http://localhost:4000/v1
 export OPENAI_API_KEY=sk-placeholder
-codex --model deepseek-chat "help me fix this bug"
+codex --model deepseek-v4-flash "help me fix this bug"
 ```
 
 ## 命令
@@ -75,13 +77,26 @@ uv run codex-adapter setup --preset deepseek --write-config  # 自动写入 conf
 
 ## 支持的模型
 
-### DeepSeek
+### DeepSeek V4
 
-| 模型名称 | 说明 |
-|---------|------|
-| `deepseek-chat` | DeepSeek 通用对话模型 |
-| `deepseek-coder` | DeepSeek 代码生成模型 |
-| `deepseek-reasoner` | DeepSeek 推理模型 |
+| 模型名称 | 说明 | 上下文 | 思考模式 |
+|---------|------|--------|---------|
+| `deepseek-v4-flash` | V4 Flash — 高性价比，默认开启思考 | 1M tokens | 支持 (high/max) |
+| `deepseek-v4-pro` | V4 Pro — 旗舰模型，深度推理 | 1M tokens | 支持 (high/max) |
+
+> 旧模型名 `deepseek-chat` 和 `deepseek-reasoner` 已废弃，分别对应 V4 Flash 的非思考和思考模式。
+
+### 思考模式
+
+代理自动将 Codex CLI 的 `reasoning.effort` 参数转换为 DeepSeek 的思考控制参数：
+
+| Codex effort | DeepSeek reasoning_effort | 说明 |
+|-------------|--------------------------|------|
+| `low` / `medium` | `high` | DeepSeek 最低支持 high |
+| `high` | `high` | 标准思考深度 |
+| `max` | `max` | 最大思考深度，适合复杂问题 |
+
+思考模式开启时，`temperature` / `top_p` 参数会自动跳过（DeepSeek 不支持）。
 
 ## 添加自定义模型
 

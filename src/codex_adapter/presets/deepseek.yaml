@@ -1,19 +1,25 @@
 provider: deepseek
-description: "DeepSeek AI models (DeepSeek-V4, DeepSeek-Chat, DeepSeek-Coder)"
+description: "DeepSeek V4 系列模型，支持思考模式与非思考模式"
 env_key: DEEPSEEK_API_KEY
+api_base: https://api.deepseek.com
 
 models:
-  - name: deepseek-chat
-    litellm_model: deepseek/deepseek-chat
+  - name: deepseek-v4-flash
+    litellm_model: deepseek-v4-flash
     api_base: https://api.deepseek.com
-    max_tokens: 8192
+    context_length: 1000000
+    max_tokens: 384000
+    description: "V4 Flash — 高性价比，默认开启思考模式"
+    supports_thinking: true
+    default_thinking: enabled
+    reasoning_effort: high
 
-  - name: deepseek-coder
-    litellm_model: deepseek/deepseek-coder
+  - name: deepseek-v4-pro
+    litellm_model: deepseek-v4-pro
     api_base: https://api.deepseek.com
-    max_tokens: 8192
-
-  - name: deepseek-reasoner
-    litellm_model: deepseek/deepseek-reasoner
-    api_base: https://api.deepseek.com
-    max_tokens: 8192
+    context_length: 1000000
+    max_tokens: 384000
+    description: "V4 Pro — 旗舰模型，支持深度推理"
+    supports_thinking: true
+    default_thinking: enabled
+    reasoning_effort: high

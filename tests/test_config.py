@@ -36,7 +36,7 @@ class TestPreset:
         assert preset.models[0].name == "test-model-1"
         assert preset.models[0].litellm_model == "test/model-1"
         assert preset.models[0].max_tokens == 4096
-        assert preset.models[1].max_tokens == 4096  # default
+        assert preset.models[1].max_tokens == 8192  # default
 
     def test_from_yaml(self, tmp_path: Path):
         import yaml
@@ -55,13 +55,59 @@ class TestPreset:
         preset = Preset.from_dict(data)
         assert preset.description == ""
 
+    def test_thinking_fields(self):
+        data = {
+            "provider": "deepseek",
+            "env_key": "DEEPSEEK_API_KEY",
+            "models": [{
+                "name": "deepseek-v4-flash",
+                "litellm_model": "deepseek-v4-flash",
+                "api_base": "https://api.deepseek.com",
+                "supports_thinking": True,
+                "default_thinking": "enabled",
+                "reasoning_effort": "high",
+            }],
+        }
+        preset = Preset.from_dict(data)
+        m = preset.models[0]
+        assert m.supports_thinking is True
+        assert m.default_thinking == "enabled"
+        assert m.reasoning_effort == "high"
+
+    def test_thinking_fields_defaults(self):
+        preset = Preset.from_dict(SAMPLE_PRESET_DATA)
+        m = preset.models[0]
+        assert m.supports_thinking is False
+        assert m.default_thinking == "disabled"
+        assert m.reasoning_effort == "high"
+
+    def test_api_base_inherited_from_preset(self):
+        """Model without api_base should inherit from top-level preset api_base."""
+        data = {
+            "provider": "deepseek",
+            "env_key": "DEEPSEEK_API_KEY",
+            "api_base": "https://api.deepseek.com",
+            "models": [{
+                "name": "deepseek-v4-flash",
+                "litellm_model": "deepseek-v4-flash",
+            }],
+        }
+        preset = Preset.from_dict(data)
+        assert preset.models[0].api_base == "https://api.deepseek.com"
+
 
 class TestLoadPreset:
     def test_load_builtin_deepseek(self):
         preset = load_preset("deepseek")
         assert preset.provider == "deepseek"
         assert preset.env_key == "DEEPSEEK_API_KEY"
-        assert len(preset.models) >= 1
+        assert len(preset.models) == 2
+        names = [m.name for m in preset.models]
+        assert "deepseek-v4-flash" in names
+        assert "deepseek-v4-pro" in names
+        # Both should support thinking
+        for m in preset.models:
+            assert m.supports_thinking is True
 
     def test_load_custom_preset(self, tmp_path: Path):
         import yaml
