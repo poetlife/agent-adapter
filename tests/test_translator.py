@@ -8,6 +8,7 @@ from codex_adapter.translator import (
     ModelConfig,
     chat_response_to_responses,
     responses_request_to_chat,
+    translate_stream,
 )
 
 
@@ -435,3 +436,211 @@ class TestThinkingModeResponse:
         assert "reasoning" in types
         assert "function_call" in types
         assert result["status"] == "incomplete"
+
+
+class TestMultiTurnReasoningContent:
+    """Test multi-turn conversations with reasoning_content (the root cause scenario)."""
+
+    def test_reasoning_content_attached_to_function_call(self):
+        """Reasoning item before function_call should merge reasoning_content into assistant msg."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "What's the weather?"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "I need to check weather"}]},
+                {"type": "function_call", "call_id": "call_001", "name": "get_weather", "arguments": '{"city":"Beijing"}'},
+                {"type": "function_call_output", "call_id": "call_001", "output": '{"temp": 25}'},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+        msgs = result["messages"]
+
+        # The assistant message (function_call) should have reasoning_content
+        assistant_msg = [m for m in msgs if m["role"] == "assistant"][0]
+        assert "reasoning_content" in assistant_msg
+        assert assistant_msg["reasoning_content"] == "I need to check weather"
+        assert "tool_calls" in assistant_msg
+
+    def test_reasoning_content_present_when_thinking_enabled(self):
+        """When thinking is enabled and history has reasoning_content, both should be in request."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Hello"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking..."}]},
+                {"type": "message", "role": "assistant", "content": "Hi there!"},
+                {"type": "message", "role": "user", "content": "Follow up"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        # Thinking should be enabled
+        assert result["thinking"]["type"] == "enabled"
+        # Assistant message should carry reasoning_content
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["reasoning_content"] == "thinking..."
+
+
+class TestConsecutiveAssistantMerge:
+    """Test merging of consecutive assistant messages (parallel tool calls)."""
+
+    def test_parallel_tool_calls_merged(self):
+        """Multiple function_call items should merge into one assistant message."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Read both files"},
+                {"type": "function_call", "call_id": "call_001", "name": "read_file", "arguments": '{"path":"a.py"}'},
+                {"type": "function_call", "call_id": "call_002", "name": "read_file", "arguments": '{"path":"b.py"}'},
+                {"type": "function_call_output", "call_id": "call_001", "output": "content a"},
+                {"type": "function_call_output", "call_id": "call_002", "output": "content b"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        # Should have exactly one assistant message
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        # With both tool_calls combined
+        assert len(assistant_msgs[0]["tool_calls"]) == 2
+        names = [tc["function"]["name"] for tc in assistant_msgs[0]["tool_calls"]]
+        assert names == ["read_file", "read_file"]
+
+    def test_three_parallel_tool_calls_merged(self):
+        """Three consecutive function_calls merge into one assistant message with 3 tool_calls."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Do three things"},
+                {"type": "function_call", "call_id": "c1", "name": "tool1", "arguments": "{}"},
+                {"type": "function_call", "call_id": "c2", "name": "tool2", "arguments": "{}"},
+                {"type": "function_call", "call_id": "c3", "name": "tool3", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "r1"},
+                {"type": "function_call_output", "call_id": "c2", "output": "r2"},
+                {"type": "function_call_output", "call_id": "c3", "output": "r3"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert len(assistant_msgs[0]["tool_calls"]) == 3
+
+    def test_assistant_text_plus_tool_call_merged(self):
+        """Assistant text message followed by function_call should merge."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Help me"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking..."}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Let me check"}]},
+                {"type": "function_call", "call_id": "call_001", "name": "search", "arguments": '{"q":"test"}'},
+                {"type": "function_call_output", "call_id": "call_001", "output": "found it"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        # Content preserved
+        assert assistant_msgs[0]["content"] == "Let me check"
+        # Tool call merged in
+        assert len(assistant_msgs[0]["tool_calls"]) == 1
+        # Reasoning preserved
+        assert assistant_msgs[0].get("reasoning_content") == "thinking..."
+
+    def test_no_consecutive_assistant_in_output(self):
+        """No matter the input pattern, output must never have consecutive assistant messages."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Complex task"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "step 1"}]},
+                {"type": "function_call", "call_id": "c1", "name": "t1", "arguments": "{}"},
+                {"type": "function_call", "call_id": "c2", "name": "t2", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "r1"},
+                {"type": "function_call_output", "call_id": "c2", "output": "r2"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "step 2"}]},
+                {"type": "function_call", "call_id": "c3", "name": "t3", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c3", "output": "r3"},
+                {"type": "message", "role": "user", "content": "Continue"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        # Verify no consecutive assistant messages
+        msgs = result["messages"]
+        for i in range(1, len(msgs)):
+            if msgs[i]["role"] == "assistant":
+                assert msgs[i - 1]["role"] != "assistant", (
+                    f"Consecutive assistant messages at [{i-1}] and [{i}]"
+                )
+
+
+class TestTranslateStreamError:
+    """Test translate_stream handling of in-stream error objects."""
+
+    @pytest.mark.asyncio
+    async def test_stream_error_object_produces_response_failed(self):
+        """An error JSON in the SSE stream should emit response.failed, not silently disconnect."""
+
+        async def fake_stream():
+            # DeepSeek sometimes returns 200 OK but sends an error in the data
+            yield b'data: {"error":{"message":"The `reasoning_content` in the input messages[2] is not allowed when the thinking parameter is disabled.","param":null,"code":"invalid_request_error"}}'
+            yield b"data: [DONE]"
+
+        events = []
+        async for chunk in translate_stream(fake_stream(), "deepseek-v4-flash"):
+            events.append(chunk.decode("utf-8"))
+
+        # Should have response.created, error, and response.failed
+        event_types = []
+        for ev in events:
+            for line in ev.strip().split("\n"):
+                if line.startswith("event: "):
+                    event_types.append(line[7:])
+
+        assert "response.created" in event_types
+        assert "error" in event_types
+        assert "response.failed" in event_types
+
+        # Verify the error message is complete (not truncated)
+        for ev in events:
+            if "response.failed" in ev:
+                data_line = [l for l in ev.strip().split("\n") if l.startswith("data: ")][0]
+                data = json.loads(data_line[6:])
+                assert "reasoning_content" in data["response"]["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_normal_stream_unaffected(self):
+        """Normal streaming chunks should still work correctly after the error handling change."""
+
+        async def fake_stream():
+            yield b'data: {"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}'
+            yield b'data: {"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":null}]}'
+            yield b'data: {"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}'
+            yield b"data: [DONE]"
+
+        events = []
+        async for chunk in translate_stream(fake_stream(), "deepseek-v4-flash"):
+            events.append(chunk.decode("utf-8"))
+
+        event_types = []
+        for ev in events:
+            for line in ev.strip().split("\n"):
+                if line.startswith("event: "):
+                    event_types.append(line[7:])
+
+        assert "response.created" in event_types
+        assert "response.output_text.delta" in event_types
+        assert "response.completed" in event_types
+        # No error events
+        assert "error" not in event_types
+        assert "response.failed" not in event_types

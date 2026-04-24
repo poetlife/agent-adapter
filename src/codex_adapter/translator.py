@@ -21,10 +21,14 @@ DeepSeek V4 thinking mode mapping:
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
+
+# Best-effort import of proxy debug logger; translator can also be used standalone.
+_logger = logging.getLogger("codex_adapter.debug")
 
 
 @dataclass
@@ -250,7 +254,62 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "reasoning_content": pending_reasoning,
         })
 
+    # Merge consecutive assistant messages.
+    # Codex CLI emits each function_call as a separate item, but the Chat
+    # Completions API forbids consecutive assistant messages.  We fold them
+    # into a single assistant message with a combined tool_calls array.
+    messages = _merge_consecutive_assistant(messages)
+
     return messages
+
+
+def _merge_consecutive_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive assistant messages into one.
+
+    DeepSeek (and most Chat Completions providers) reject consecutive
+    assistant messages.  Codex CLI's Responses API format emits one item
+    per function_call, which each become a separate assistant message
+    after ``_convert_input_items``.
+
+    This function merges them:
+      - ``tool_calls`` arrays are concatenated.
+      - ``reasoning_content`` strings are concatenated (newline-separated).
+      - ``content`` is kept from the first non-None value; later text is
+        appended (unlikely but defensive).
+    """
+    if not messages:
+        return messages
+
+    merged: list[dict[str, Any]] = []
+    for msg in messages:
+        if (
+            merged
+            and msg["role"] == "assistant"
+            and merged[-1]["role"] == "assistant"
+        ):
+            prev = merged[-1]
+            # Merge tool_calls
+            if msg.get("tool_calls"):
+                prev.setdefault("tool_calls", [])
+                prev["tool_calls"].extend(msg["tool_calls"])
+            # Merge reasoning_content
+            if msg.get("reasoning_content"):
+                if prev.get("reasoning_content"):
+                    prev["reasoning_content"] += "\n" + msg["reasoning_content"]
+                else:
+                    prev["reasoning_content"] = msg["reasoning_content"]
+            # Merge content (prefer non-None)
+            new_content = msg.get("content")
+            if new_content is not None:
+                old_content = prev.get("content")
+                if old_content is None or old_content == "":
+                    prev["content"] = new_content
+                elif isinstance(old_content, str) and isinstance(new_content, str):
+                    prev["content"] = old_content + new_content
+        else:
+            merged.append(msg)
+
+    return merged
 
 
 def _convert_content_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
@@ -488,6 +547,59 @@ async def translate_stream(
                 chunk_data = json.loads(data_str)
             except json.JSONDecodeError:
                 continue
+
+            # Detect in-stream error objects from backend.
+            # Some providers (e.g. DeepSeek) may return HTTP 200 but send an
+            # error JSON object in the SSE data instead of a normal chunk.
+            if "error" in chunk_data and "choices" not in chunk_data:
+                error_obj = chunk_data["error"]
+                error_msg = error_obj.get("message", "Unknown upstream error")
+                error_code = error_obj.get("code", "upstream_error")
+                _logger.warning(
+                    "[STREAM-ERR] In-stream error from backend:\n%s",
+                    json.dumps(chunk_data, ensure_ascii=False, indent=2),
+                )
+                # Emit response.created if not yet emitted so Codex CLI sees
+                # the response lifecycle.
+                if not created_emitted:
+                    created_emitted = True
+                    yield _sse_event("response.created", {
+                        "type": "response.created",
+                        "response": {
+                            "id": resp_id,
+                            "object": "response",
+                            "status": "in_progress",
+                            "model": model,
+                            "output": [],
+                        },
+                    })
+                # Emit structured error and response.failed for Codex CLI
+                yield _sse_event("error", {
+                    "error": {
+                        "message": error_msg,
+                        "type": str(error_code),
+                        "code": str(error_code),
+                    }
+                })
+                failed_resp = {
+                    "id": resp_id,
+                    "object": "response",
+                    "created_at": int(time.time()),
+                    "model": model,
+                    "output": [],
+                    "output_text": "",
+                    "status": "failed",
+                    "error": {
+                        "code": str(error_code),
+                        "message": error_msg,
+                    },
+                    "usage": usage,
+                }
+                yield _sse_event("response.failed", {
+                    "type": "response.failed",
+                    "response": failed_resp,
+                })
+                return
 
             # Update model
             if "model" in chunk_data:

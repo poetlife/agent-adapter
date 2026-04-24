@@ -10,8 +10,10 @@ the protocol in both directions transparently.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,84 @@ from codex_adapter.translator import (
 )
 
 console = Console()
+
+# ---------------------------------------------------------------------------
+# Debug logger — writes to ~/.config/codex-adapter/debug.log when --debug
+# ---------------------------------------------------------------------------
+_debug_logger: logging.Logger | None = None
+
+
+def _init_debug_logger() -> logging.Logger:
+    """Create a file-backed logger for request/response diagnostics."""
+    global _debug_logger
+    if _debug_logger is not None:
+        return _debug_logger
+
+    log_dir = get_user_config_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "debug.log"
+
+    logger = logging.getLogger("codex_adapter.debug")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    # Rotate: keep last log, start fresh each run
+    if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:  # 10 MB
+        log_path.with_suffix(".log.old").unlink(missing_ok=True)
+        log_path.rename(log_path.with_suffix(".log.old"))
+
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger.addHandler(fh)
+
+    _debug_logger = logger
+    logger.info("=== codex-adapter debug log started ===")
+    return logger
+
+
+def _log_debug(msg: str, data: Any = None) -> None:
+    """Log a debug message + optional JSON payload (no-op if logger not init'd)."""
+    if _debug_logger is None:
+        return
+    if data is not None:
+        try:
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = repr(data)
+        _debug_logger.debug("%s\n%s", msg, text)
+    else:
+        _debug_logger.debug(msg)
+
+
+def _sanitize_messages_for_log(messages: list[dict]) -> list[dict]:
+    """Summarize messages for debug log — truncate long content, keep structure."""
+    result = []
+    for msg in messages:
+        entry: dict[str, Any] = {"role": msg.get("role", "?")}
+        # Content — truncate to 200 chars
+        content = msg.get("content")
+        if content is None:
+            entry["content"] = None
+        elif isinstance(content, str):
+            entry["content"] = content[:200] + ("..." if len(content) > 200 else "")
+        else:
+            entry["content"] = "[list]"
+        # reasoning_content
+        if "reasoning_content" in msg:
+            rc = msg["reasoning_content"]
+            entry["reasoning_content"] = rc[:100] + ("..." if len(rc) > 100 else "") if rc else rc
+        # tool_calls — just count + names
+        if "tool_calls" in msg:
+            tcs = msg["tool_calls"]
+            entry["tool_calls"] = [
+                {"id": tc.get("id", "?"), "name": tc.get("function", {}).get("name", "?")}
+                for tc in tcs
+            ]
+        # tool_call_id
+        if "tool_call_id" in msg:
+            entry["tool_call_id"] = msg["tool_call_id"]
+        result.append(entry)
+    return result
 
 
 def _build_backend_url(preset: Preset, model_name: str | None = None) -> str:
@@ -94,6 +174,30 @@ def create_app(preset: Preset) -> Starlette:
         if model_entry:
             chat_body["model"] = model_entry.litellm_model
 
+        # --- Debug logging ---
+        _log_debug("[REQ] Responses API input", {
+            "model": model_name,
+            "stream": is_stream,
+            "input_item_count": len(body.get("input", [])) if isinstance(body.get("input"), list) else "string",
+            "reasoning": body.get("reasoning"),
+            "tools_count": len(body.get("tools", [])),
+        })
+        # Log the raw input items so we see exactly what Codex CLI sends
+        raw_input = body.get("input", "")
+        if isinstance(raw_input, list):
+            _log_debug("[REQ] Raw input items", [
+                {k: (v[:200] + "..." if isinstance(v, str) and len(v) > 200 else v)
+                 for k, v in item.items()}
+                for item in raw_input
+            ])
+        _log_debug("[REQ] Translated Chat Completions body", {
+            "model": chat_body.get("model"),
+            "thinking": chat_body.get("thinking"),
+            "reasoning_effort": chat_body.get("reasoning_effort"),
+            "message_count": len(chat_body.get("messages", [])),
+            "messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
+        })
+
         # Build backend request
         backend_url = _build_backend_url(preset, model_name)
         api_key = _get_api_key(preset)
@@ -116,6 +220,10 @@ def create_app(preset: Preset) -> Starlette:
             resp = await client.post(url, json=chat_body, headers=headers)
 
         if resp.status_code != 200:
+            _log_debug("[ERR] Non-streaming backend error", {
+                "status": resp.status_code,
+                "error": resp.text[:2000],
+            })
             return JSONResponse(
                 {"error": {"message": resp.text, "type": "upstream_error", "code": resp.status_code}},
                 status_code=resp.status_code,
@@ -138,6 +246,13 @@ def create_app(preset: Preset) -> Starlette:
                         error_body = await resp.aread()
                         error_msg = error_body.decode("utf-8", errors="replace")
 
+                        _log_debug("[ERR] Backend returned non-200", {
+                            "status": resp.status_code,
+                            "error": error_msg,
+                            "chat_body_messages": _sanitize_messages_for_log(chat_body.get("messages", [])),
+                            "thinking": chat_body.get("thinking"),
+                        })
+
                         # DeepSeek thinking mode requires reasoning_content in
                         # multi-turn context.  If we get this specific error,
                         # retry once with thinking disabled as a fallback.
@@ -148,6 +263,10 @@ def create_app(preset: Preset) -> Starlette:
                         ):
                             chat_body.pop("thinking", None)
                             chat_body.pop("reasoning_effort", None)
+                            # Strip reasoning_content from messages too —
+                            # DeepSeek rejects it when thinking is disabled.
+                            for msg in chat_body.get("messages", []):
+                                msg.pop("reasoning_content", None)
                             async with client.stream("POST", url, json=chat_body, headers=headers) as retry_resp:
                                 if retry_resp.status_code == 200:
                                     async for chunk in translate_stream(retry_resp.aiter_lines(), original_model):
@@ -309,6 +428,10 @@ def start_proxy(
     debug: bool = False,
 ) -> None:
     """Start the proxy server (blocking)."""
+    # Always init debug logger — essential for diagnosing upstream errors
+    _init_debug_logger()
+    log_path = get_user_config_dir() / "debug.log"
+
     # Validate API key
     api_key = os.environ.get(preset.env_key)
     if not api_key:
@@ -325,6 +448,7 @@ def start_proxy(
     console.print(f"  Models     : [cyan]{', '.join(m.name for m in preset.models)}[/]")
     console.print(f"  Listen     : [cyan]http://{host}:{port}[/]")
     console.print(f"  Translate  : [yellow]Responses API → Chat Completions[/]")
+    console.print(f"  Debug log  : [cyan]{log_path}[/]")
     console.print()
     console.print("[bold yellow]Codex CLI usage:[/]")
     console.print(f"  export OPENAI_BASE_URL=http://localhost:{port}/v1")
