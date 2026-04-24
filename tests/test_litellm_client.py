@@ -2,8 +2,8 @@
 
 import pytest
 
-from codex_adapter.config import Preset
-from codex_adapter.litellm_client import (
+from providers.catalog import Preset
+from providers.litellm_client import (
     REQUEST_TIMEOUT_SECONDS,
     build_completion_kwargs,
     litellm_error_message,
@@ -79,7 +79,7 @@ async def test_request_chat_completion_calls_litellm(monkeypatch):
         captured.update(kwargs)
         return {"id": "chatcmpl-1"}
 
-    monkeypatch.setattr("codex_adapter.litellm_client.acompletion", fake_acompletion)
+    monkeypatch.setattr("providers.litellm_client.acompletion", fake_acompletion)
 
     response = await request_chat_completion(
         SAMPLE_PRESET,

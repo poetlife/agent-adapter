@@ -1,6 +1,6 @@
 """Tests for shared logging helpers."""
 
-from codex_adapter.logging_utils import log_debug, logger, request_log_context, resolve_trace_id
+from common.logging import log_debug, logger, request_log_context, resolve_trace_id
 
 
 def test_resolve_trace_id_from_body_metadata():

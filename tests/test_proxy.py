@@ -3,9 +3,9 @@
 import pytest
 from starlette.testclient import TestClient
 
-from codex_adapter.config import Preset
-from codex_adapter.logging_utils import get_current_trace_id
-from codex_adapter.proxy import create_app
+from providers.catalog import Preset
+from common.logging import get_current_trace_id
+from entrypoints.responses_proxy import create_app
 
 
 SAMPLE_PRESET = Preset.from_dict({
@@ -109,9 +109,9 @@ class TestLiteLLMIntegration:
                 "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
             }
 
-        monkeypatch.setattr("codex_adapter.proxy.log_debug", fake_log_debug)
-        monkeypatch.setattr("codex_adapter.proxy.request_chat_completion", fake_request_chat_completion)
-        monkeypatch.setattr("codex_adapter.proxy.serialize_completion_response", lambda response: response)
+        monkeypatch.setattr("entrypoints.responses_proxy.log_debug", fake_log_debug)
+        monkeypatch.setattr("entrypoints.responses_proxy.request_chat_completion", fake_request_chat_completion)
+        monkeypatch.setattr("entrypoints.responses_proxy.serialize_completion_response", lambda response: response)
 
         resp = client.post(
             "/v1/responses",
@@ -141,8 +141,8 @@ class TestLiteLLMIntegration:
                 "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
             }
 
-        monkeypatch.setattr("codex_adapter.proxy.request_chat_completion", fake_request_chat_completion)
-        monkeypatch.setattr("codex_adapter.proxy.serialize_completion_response", lambda response: response)
+        monkeypatch.setattr("entrypoints.responses_proxy.request_chat_completion", fake_request_chat_completion)
+        monkeypatch.setattr("entrypoints.responses_proxy.serialize_completion_response", lambda response: response)
 
         resp = client.post("/v1/responses", json={"model": "deepseek-chat", "input": "Hi"})
 
@@ -166,8 +166,8 @@ class TestLiteLLMIntegration:
             async for chunk in FakeSSEStream(chunks):
                 yield chunk
 
-        monkeypatch.setattr("codex_adapter.proxy.request_chat_completion", fake_request_chat_completion)
-        monkeypatch.setattr("codex_adapter.proxy.serialize_completion_stream", fake_serialize_completion_stream)
+        monkeypatch.setattr("entrypoints.responses_proxy.request_chat_completion", fake_request_chat_completion)
+        monkeypatch.setattr("entrypoints.responses_proxy.serialize_completion_stream", fake_serialize_completion_stream)
 
         with client.stream("POST", "/v1/responses", json={"model": "deepseek-chat", "input": "Hi", "stream": True}) as resp:
             body = "".join(resp.iter_text())

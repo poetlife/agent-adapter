@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_adapter.config import ModelEntry, Preset, list_presets, load_preset
+from providers.catalog import ModelEntry, Preset, list_presets, load_preset
 
 
 SAMPLE_PRESET_DATA = {

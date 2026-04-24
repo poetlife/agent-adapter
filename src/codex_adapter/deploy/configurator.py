@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
 from codex_adapter.codex_setup import generate_codex_config_toml, write_model_catalog
-from codex_adapter.config import list_presets, load_preset, get_user_presets_dir
+from providers.catalog import get_user_presets_dir, list_presets, load_preset
 
 console = Console()
 

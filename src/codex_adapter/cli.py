@@ -10,14 +10,14 @@ from rich.table import Table
 
 from codex_adapter import __version__
 from codex_adapter.codex_setup import print_setup_instructions, write_codex_config
-from codex_adapter.config import (
+from providers.catalog import (
     Preset,
     get_builtin_presets_dir,
     get_user_presets_dir,
     list_presets,
     load_preset,
 )
-from codex_adapter.proxy import start_proxy
+from entrypoints.responses_proxy import start_proxy
 
 console = Console()
 

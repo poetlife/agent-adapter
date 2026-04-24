@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from codex_adapter.translator import (
+from protocols.responses_chat import (
     ModelConfig,
     chat_response_to_responses,
     responses_request_to_chat,

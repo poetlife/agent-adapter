@@ -11,7 +11,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from codex_adapter.config import ModelEntry
+from protocols.codex_model_catalog import generate_codex_model_catalog
+from providers.catalog import ModelEntry
 
 console = Console()
 
@@ -93,56 +94,8 @@ def _short_profile_name(model_name: str) -> str:
 
 
 def generate_model_catalog(models: list[ModelEntry]) -> dict:
-    """Generate a Codex CLI model catalog (ModelsResponse format).
-
-    This is the JSON structure Codex CLI deserializes as ModelsResponse{models: [ModelInfo]}.
-    When loaded via model_catalog_json, it replaces the remote OpenAI catalog,
-    so Codex TUI recognizes our custom models without the fallback metadata warning.
-    """
-    catalog_models = []
-    for m in models:
-        if m.supports_thinking:
-            reasoning_levels = [
-                {"effort": "low", "description": "Fast responses with lighter reasoning"},
-                {"effort": "medium", "description": "Balanced speed and reasoning depth"},
-                {"effort": "high", "description": "Greater reasoning depth"},
-            ]
-            default_reasoning = "medium"
-        else:
-            reasoning_levels = []
-            default_reasoning = None
-
-        catalog_models.append({
-            "slug": m.name,
-            "display_name": m.name,
-            "description": m.description or f"Model: {m.name}",
-            "default_reasoning_level": default_reasoning,
-            "supported_reasoning_levels": reasoning_levels,
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "supported_in_api": True,
-            "priority": 1,
-            "additional_speed_tiers": [],
-            "availability_nux": None,
-            "upgrade": None,
-            "base_instructions": "",
-            "supports_reasoning_summaries": m.supports_thinking,
-            "default_reasoning_summary": "none",
-            "support_verbosity": False,
-            "default_verbosity": None,
-            "apply_patch_tool_type": "freeform",
-            "web_search_tool_type": "text",
-            "truncation_policy": {"mode": "tokens", "limit": 10000},
-            "supports_parallel_tool_calls": True,
-            "supports_image_detail_original": False,
-            "context_window": m.context_length,
-            "max_context_window": m.context_length,
-            "effective_context_window_percent": 90,
-            "experimental_supported_tools": [],
-            "input_modalities": ["text"],
-        })
-
-    return {"models": catalog_models}
+    """Generate the Codex CLI model catalog payload from provider models."""
+    return generate_codex_model_catalog(models)
 
 
 def write_model_catalog(models: list[ModelEntry]) -> Path:
