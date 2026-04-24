@@ -131,11 +131,32 @@ def create_app(preset: Preset) -> Starlette:
         """Forward streaming request and translate SSE events."""
 
         async def event_generator():
+            nonlocal chat_body
             async with httpx.AsyncClient(timeout=300) as client:
                 async with client.stream("POST", url, json=chat_body, headers=headers) as resp:
                     if resp.status_code != 200:
                         error_body = await resp.aread()
                         error_msg = error_body.decode("utf-8", errors="replace")
+
+                        # DeepSeek thinking mode requires reasoning_content in
+                        # multi-turn context.  If we get this specific error,
+                        # retry once with thinking disabled as a fallback.
+                        if (
+                            resp.status_code == 400
+                            and "reasoning_content" in error_msg
+                            and chat_body.get("thinking", {}).get("type") == "enabled"
+                        ):
+                            chat_body.pop("thinking", None)
+                            chat_body.pop("reasoning_effort", None)
+                            async with client.stream("POST", url, json=chat_body, headers=headers) as retry_resp:
+                                if retry_resp.status_code == 200:
+                                    async for chunk in translate_stream(retry_resp.aiter_lines(), original_model):
+                                        yield chunk
+                                    return
+                                # Retry also failed — fall through to error path
+                                error_body = await retry_resp.aread()
+                                error_msg = error_body.decode("utf-8", errors="replace")
+
                         error_event = {
                             "error": {
                                 "message": error_msg,
