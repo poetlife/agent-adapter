@@ -65,3 +65,29 @@ Codex CLI → POST /v1/responses → proxy.py → translator.py → POST /v1/cha
 ## Testing
 
 Tests are in `tests/` using pytest + pytest-asyncio. The translator tests (`test_translator.py`, 437 lines) are the most important — they document the exact translation behavior for requests, responses, streaming, thinking mode, and tool calls. Use them as the spec when modifying translation logic.
+
+## Principles
+
+### Single Source of Truth
+
+同一件事在整个仓库里必须只有一个事实标准来源。这是跨所有脚本、workflow 和文档的强约束，优先级高于"就近实现"和"临时便捷"。
+
+**判定标准（满足任意一条即视为"同一件事"）：**
+
+- 同一个判断（例如：Python/Node 版本是否满足要求、某工具是否可用）
+- 同一类副作用（例如：写一个 structured log、通过 subprocess 启动守护进程、kubectl apply 本地 patch）
+- 同一个数据源（例如：服务端口映射、模型配置清单、预设文件路径）
+
+**禁止行为：**
+
+- 脚本 A 和方法 1 做了判断，脚本 B 做同样的判断时另写方法 2（即使"两行就搞定"）。
+- 把公共函数复制一份做"轻微定制"而不是汇总到公共模块。
+- 在文档中给出与代码实现不一致的描述，制造第二个事实来源。
+
+**改动前必做：**
+
+1. 先查 `docs/ssot-registry.md`（如不存在则无需操作），确认要做的"判断/操作/数据读取"是否已有登记。
+2. 若已有登记：直接复用该入口；不满足需求时改进那一个入口，不要在调用侧绕开。
+3. 若没有登记但这是一个跨脚本反复出现的模式：抽到公共模块（如 `deploy/*.py` 或 `config.py`），并在注册表中登记一行。
+
+> 注册表维护在 `docs/ssot-registry.md`，AGENTS.md 不收录具体条目以避免膨胀。注册表中每行记录一个入口（函数/变量/模块路径）及其解决的问题。当前项目规模小，注册表可选；当代码量增长后应补建。
