@@ -46,10 +46,3 @@
 | `configure_all()` / `write_env_file()` / `write_codex_config_file()` | `codex_adapter.deploy.configurator` | 一键部署配置 | cli |
 | `install_all()` / `service_manager.*` / `systemd.*` | `codex_adapter.deploy.*` | 安装依赖与后台服务管理 | cli |
 
-## 🚧 兼容层
-
-| 兼容模块 | Canonical 模块 | 说明 |
-|---|---|---|
-| `codex_adapter.config` | `providers.catalog` | 保留导入兼容，禁止新增真实实现 |
-| `codex_adapter.litellm_client` | `providers.litellm_client` | 保留导入兼容，禁止新增真实实现 |
-| `codex_adapter.translator` | `protocols.responses_chat` | 保留导入兼容，禁止新增真实实现 |

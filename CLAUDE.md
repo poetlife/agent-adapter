@@ -59,7 +59,7 @@ Codex CLI → POST /v1/responses → proxy.py → translator.py → litellm_clie
 ## Key Design Decisions
 
 - **All I/O is async** (httpx, Starlette, uvicorn). Don't introduce sync blocking calls in the request path.
-- **All upstream model access must go through LiteLLM** via `codex_adapter.litellm_client`. Do not call provider chat-completions endpoints directly from `proxy.py` or other request-path code with raw `httpx`.
+- **All upstream model access must go through LiteLLM** via `providers.litellm_client`. Do not call provider chat-completions endpoints directly from `entrypoints.responses_proxy.py` or other request-path code with raw `httpx`.
 - **Thinking mode mapping is non-trivial**: DeepSeek's minimum is `high`, so Codex's `low`/`medium` both map to `high`. When thinking is enabled, `temperature`/`top_p` are dropped (DeepSeek restriction).
 - **Deploy module uses pure functions** where possible (e.g., `generate_env_content()`, `generate_unit()`) for testability and future API/platform reuse.
 - **Preset YAML is the configuration boundary** — all provider-specific details (api_base, model names, thinking support) are encapsulated in presets, not hardcoded.
