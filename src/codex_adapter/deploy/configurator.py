@@ -94,31 +94,50 @@ def write_env_file(
 # Codex CLI config
 # ---------------------------------------------------------------------------
 
-def write_codex_config_file(port: int = 4000) -> Path | None:
+def write_codex_config_file(port: int = 4000, model: str | None = None) -> Path | None:
     """Generate and write Codex CLI config.toml.
 
-    If the file exists and already has our section, skip.
-    If the file exists without our section, append.
-    If the file doesn't exist, create.
+    Strategy:
+    - If no file exists: create from scratch.
+    - If file exists with our provider and correct wire_api: skip.
+    - If file exists but has issues (missing wire_api, old wire_api="chat",
+      or no codex-adapter section): back up and rewrite.
 
     Returns the path written, or None if skipped.
     """
     CODEX_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    section = generate_codex_config_toml(port=port)
+    section = generate_codex_config_toml(port=port, model=model)
 
     if CODEX_CONFIG_FILE.exists():
         existing = CODEX_CONFIG_FILE.read_text()
-        if "codex-adapter" in existing:
+
+        # Check if already correctly configured
+        has_adapter = "codex-adapter" in existing
+        has_correct_wire = 'wire_api = "responses"' in existing
+        has_bad_wire = 'wire_api = "chat"' in existing
+
+        if has_adapter and has_correct_wire and not has_bad_wire:
             console.print(
-                f"[green]Codex config already contains adapter section:[/] {CODEX_CONFIG_FILE}"
+                f"[green]Codex config already correctly configured:[/] {CODEX_CONFIG_FILE}"
             )
             return CODEX_CONFIG_FILE
 
-        # Append our section
-        with open(CODEX_CONFIG_FILE, "a") as f:
-            f.write("\n" + section)
-        console.print(f"[green]Appended adapter section to:[/] {CODEX_CONFIG_FILE}")
+        # Needs fixing — back up and rewrite
+        from datetime import datetime
+        backup_name = f"config.toml.bak.{datetime.now():%Y%m%d%H%M%S}"
+        backup_path = CODEX_CONFIG_DIR / backup_name
+        backup_path.write_text(existing)
+        console.print(f"[yellow]Backed up existing config to:[/] {backup_path}")
+
+        if has_bad_wire:
+            console.print(
+                '[yellow]Found wire_api = "chat" (no longer supported by Codex CLI).[/] '
+                "Replacing with correct configuration."
+            )
+
+        CODEX_CONFIG_FILE.write_text(section)
+        console.print(f"[green]Codex config rewritten:[/] {CODEX_CONFIG_FILE}")
     else:
         CODEX_CONFIG_FILE.write_text(section)
         console.print(f"[green]Codex config written:[/] {CODEX_CONFIG_FILE}")
@@ -273,7 +292,8 @@ def configure_all(
     )
 
     # Write Codex config
-    codex_path = write_codex_config_file(port=port)
+    default_model = preset_obj.models[0].name if preset_obj.models else None
+    codex_path = write_codex_config_file(port=port, model=default_model)
 
     # Inject shell profile
     profile_path = inject_shell_profile(env_path)

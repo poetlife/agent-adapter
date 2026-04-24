@@ -30,21 +30,23 @@ def generate_shell_exports(port: int = 4000, model: str | None = None) -> str:
 def generate_codex_config_toml(port: int = 4000, model: str | None = None) -> str:
     """Generate Codex CLI config.toml content for the adapter proxy.
 
-    No wire_api needed — the proxy itself handles Responses API translation.
-    Codex CLI talks Responses API to our proxy, proxy translates to Chat Completions
-    before forwarding to the actual model provider.
+    Codex CLI talks Responses API to our proxy (wire_api = "responses"),
+    the proxy translates to Chat Completions before forwarding to the
+    actual model provider.
     """
+    model_line = f'model = "{model}"' if model else '# model = "deepseek-v4-flash"'
     return f"""\
 # Codex Adapter - Auto-generated config
 # Place this in ~/.codex/config.toml
-#
-# The adapter proxy handles Responses API → Chat Completions translation
-# automatically, so Codex CLI can use its native Responses API protocol.
+
+{model_line}
+model_provider = "codex-adapter"
 
 [model_providers.codex-adapter]
 name = "Codex Adapter Proxy"
 base_url = "http://localhost:{port}/v1"
 env_key = "OPENAI_API_KEY"
+wire_api = "responses"
 """
 
 
