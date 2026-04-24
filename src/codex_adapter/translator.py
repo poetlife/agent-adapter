@@ -151,12 +151,18 @@ def _convert_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Also handles reasoning_content from previous assistant turns for DeepSeek
     multi-turn tool-call conversations.
+
+    Role mapping: 'developer' → 'system' (DeepSeek doesn't support 'developer').
     """
     messages: list[dict[str, Any]] = []
 
     for item in items:
         item_type = item.get("type", "")
         role = item.get("role", "user")
+        # DeepSeek (and most non-OpenAI providers) only accept:
+        # system, user, assistant, tool
+        if role == "developer":
+            role = "system"
 
         if item_type == "message" or "content" in item:
             # Standard message item
@@ -360,9 +366,12 @@ async def translate_stream(
 ) -> AsyncIterator[bytes]:
     """Translate a Chat Completions SSE stream to Responses API SSE events.
 
-    Handles DeepSeek's reasoning_content streaming:
-      - reasoning_content deltas → response.reasoning.delta events
-      - content deltas → response.output_text.delta events (as before)
+    Event data format follows the OpenAI Responses API spec as consumed by
+    Codex CLI (Rust):
+      - Every data payload MUST have a "type" field matching the event name.
+      - response.created / response.completed wrap the response in a "response" key.
+      - response.output_item.added / .done wrap the item in an "item" key.
+      - Delta events use top-level "delta", "item_id", etc.
     """
     resp_id = f"resp_{uuid.uuid4().hex[:24]}"
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -393,7 +402,7 @@ async def translate_stream(
                 continue
 
             if data_str.strip() == "[DONE]":
-                # Emit final completed event
+                # Build final output items for response.completed
                 final_output: list[dict[str, Any]] = []
                 if accumulated_reasoning:
                     final_output.append({
@@ -417,7 +426,15 @@ async def translate_stream(
                         "arguments": tc.get("arguments", ""),
                     })
 
-                completed = {
+                # Emit response.output_item.done for each accumulated item
+                for item in final_output:
+                    yield _sse_event("response.output_item.done", {
+                        "type": "response.output_item.done",
+                        "item": item,
+                    })
+
+                # Emit response.completed (Codex CLI reads "response" sub-field)
+                completed_resp = {
                     "id": resp_id,
                     "object": "response",
                     "created_at": int(time.time()),
@@ -427,8 +444,10 @@ async def translate_stream(
                     "status": "completed",
                     "usage": usage,
                 }
-                yield _sse_event("response.completed", completed)
-                yield b"event: done\ndata: [DONE]\n\n"
+                yield _sse_event("response.completed", {
+                    "type": "response.completed",
+                    "response": completed_resp,
+                })
                 return
 
             # Parse JSON
@@ -444,14 +463,16 @@ async def translate_stream(
             # Emit response.created once
             if not created_emitted:
                 created_emitted = True
-                created_event = {
-                    "id": resp_id,
-                    "object": "response",
-                    "status": "in_progress",
-                    "model": model,
-                    "output": [],
-                }
-                yield _sse_event("response.created", created_event)
+                yield _sse_event("response.created", {
+                    "type": "response.created",
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "status": "in_progress",
+                        "model": model,
+                        "output": [],
+                    },
+                })
 
             # Extract choices
             choices = chunk_data.get("choices", [])
@@ -474,13 +495,18 @@ async def translate_stream(
                     if not reasoning_part_emitted:
                         reasoning_part_emitted = True
                         yield _sse_event("response.output_item.added", {
-                            "type": "reasoning",
-                            "id": reasoning_id,
-                            "summary": [],
+                            "type": "response.output_item.added",
+                            "item": {
+                                "type": "reasoning",
+                                "id": reasoning_id,
+                                "summary": [],
+                            },
                         })
                     accumulated_reasoning += reasoning_delta
-                    yield _sse_event("response.reasoning.delta", {
-                        "type": "reasoning",
+                    yield _sse_event("response.reasoning_summary_text.delta", {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": reasoning_id,
+                        "summary_index": 0,
                         "delta": reasoning_delta,
                     })
 
@@ -490,18 +516,25 @@ async def translate_stream(
                     if not text_part_emitted:
                         text_part_emitted = True
                         yield _sse_event("response.output_item.added", {
-                            "type": "message",
-                            "id": msg_id,
-                            "role": "assistant",
-                            "content": [],
+                            "type": "response.output_item.added",
+                            "item": {
+                                "type": "message",
+                                "id": msg_id,
+                                "role": "assistant",
+                                "content": [],
+                            },
                         })
                         yield _sse_event("response.content_part.added", {
-                            "type": "output_text",
-                            "text": "",
+                            "type": "response.content_part.added",
+                            "item_id": msg_id,
+                            "content_index": 0,
+                            "part": {"type": "output_text", "text": ""},
                         })
                     accumulated_text += text_delta
                     yield _sse_event("response.output_text.delta", {
-                        "type": "output_text",
+                        "type": "response.output_text.delta",
+                        "item_id": msg_id,
+                        "content_index": 0,
                         "delta": text_delta,
                     })
 
