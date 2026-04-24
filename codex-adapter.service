@@ -1,0 +1,46 @@
+[Unit]
+Description=Codex Adapter Proxy Service
+Documentation=https://github.com/your-org/agent-adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+
+# 环境文件 (由 configure.sh 生成)
+EnvironmentFile=__ENV_FILE__
+
+# 工作目录
+WorkingDirectory=__PROJECT_DIR__
+
+# 启动命令
+ExecStart=__VENV_BIN__/codex-adapter start --preset __PRESET__ --port __PORT__
+
+# 健康检查 (可选)
+# ExecStartPost=/usr/bin/curl -sf http://localhost:__PORT__/health
+
+# 重启策略
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-adapter
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__PROJECT_DIR__ /tmp
+PrivateTmp=yes
+
+# 资源限制
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
