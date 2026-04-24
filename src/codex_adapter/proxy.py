@@ -135,14 +135,31 @@ def create_app(preset: Preset) -> Starlette:
                 async with client.stream("POST", url, json=chat_body, headers=headers) as resp:
                     if resp.status_code != 200:
                         error_body = await resp.aread()
+                        error_msg = error_body.decode("utf-8", errors="replace")
                         error_event = {
                             "error": {
-                                "message": error_body.decode("utf-8", errors="replace"),
+                                "message": error_msg,
                                 "type": "upstream_error",
                                 "code": resp.status_code,
                             }
                         }
                         yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
+                        # Codex CLI expects every stream to end with response.completed + done
+                        import time as _time
+                        import uuid as _uuid
+                        failed_resp = {
+                            "id": f"resp_{_uuid.uuid4().hex[:24]}",
+                            "object": "response",
+                            "created_at": int(_time.time()),
+                            "model": original_model,
+                            "output": [],
+                            "output_text": "",
+                            "status": "failed",
+                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                            "error": error_event["error"],
+                        }
+                        yield f"event: response.completed\ndata: {json.dumps(failed_resp)}\n\n".encode()
+                        yield b"event: done\ndata: [DONE]\n\n"
                         return
 
                     async for chunk in translate_stream(resp.aiter_lines(), original_model):
