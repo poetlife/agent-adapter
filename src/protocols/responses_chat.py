@@ -278,6 +278,7 @@ def _convert_input_items(
     # Completions API forbids consecutive assistant messages.  We fold them
     # into a single assistant message with a combined tool_calls array.
     messages = _merge_consecutive_assistant(messages)
+    messages = _prune_unanswered_tool_calls(messages)
 
     return messages
 
@@ -329,6 +330,77 @@ def _merge_consecutive_assistant(messages: list[dict[str, Any]]) -> list[dict[st
             merged.append(msg)
 
     return merged
+
+
+def _prune_unanswered_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop historical tool calls that do not have immediate tool outputs.
+
+    Chat Completions requires an assistant message with ``tool_calls`` to be
+    followed by tool messages for every call id before any other role appears.
+    Codex can include an in-progress or interrupted function_call item in the
+    Responses history; forwarding that open call makes DeepSeek reject the
+    entire request.  Keep only closed tool-call groups.
+    """
+    pruned: list[dict[str, Any]] = []
+    index = 0
+
+    while index < len(messages):
+        msg = messages[index]
+        role = msg.get("role")
+
+        if role == "tool":
+            # A tool message without a preceding kept assistant tool_call is
+            # invalid Chat Completions history.
+            index += 1
+            continue
+
+        tool_calls = msg.get("tool_calls") if role == "assistant" else None
+        if not tool_calls:
+            pruned.append(msg)
+            index += 1
+            continue
+
+        following_tools: list[dict[str, Any]] = []
+        next_index = index + 1
+        while next_index < len(messages) and messages[next_index].get("role") == "tool":
+            following_tools.append(messages[next_index])
+            next_index += 1
+
+        answered_ids = {
+            tool.get("tool_call_id")
+            for tool in following_tools
+            if tool.get("tool_call_id")
+        }
+        kept_calls = [
+            tool_call
+            for tool_call in tool_calls
+            if tool_call.get("id") in answered_ids
+        ]
+
+        if kept_calls:
+            tools_by_id = {
+                tool.get("tool_call_id"): tool
+                for tool in following_tools
+                if tool.get("tool_call_id")
+            }
+            kept_msg = dict(msg)
+            kept_msg["tool_calls"] = kept_calls
+            pruned.append(kept_msg)
+            pruned.extend(
+                tools_by_id[tool_call["id"]]
+                for tool_call in kept_calls
+                if tool_call.get("id") in tools_by_id
+            )
+        else:
+            content = msg.get("content")
+            if content not in (None, ""):
+                kept_msg = dict(msg)
+                kept_msg.pop("tool_calls", None)
+                pruned.append(kept_msg)
+
+        index = next_index
+
+    return pruned
 
 
 def _convert_content_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:

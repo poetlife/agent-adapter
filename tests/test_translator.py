@@ -494,8 +494,8 @@ class TestMultiTurnReasoningContent:
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0]["reasoning_content"] == "thinking..."
 
-    def test_tool_continuation_reuses_previous_reasoning_when_missing(self):
-        """Assistant continuation after tool output should inherit prior reasoning in thinking mode."""
+    def test_open_tool_call_after_tool_output_is_pruned(self):
+        """Open assistant tool calls must not be sent without matching tool output."""
         body = {
             "model": "deepseek-v4-flash",
             "input": [
@@ -510,9 +510,14 @@ class TestMultiTurnReasoningContent:
         result = responses_request_to_chat(body, model_config=config)
 
         assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
-        assert len(assistant_msgs) == 2
+        assert len(assistant_msgs) == 1
         assert assistant_msgs[0]["reasoning_content"] == "Need to wait longer"
-        assert assistant_msgs[1]["reasoning_content"] == "Need to wait longer"
+        assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_001"
+        assert all(
+            tool_call["id"] != "call_002"
+            for msg in assistant_msgs
+            for tool_call in msg.get("tool_calls", [])
+        )
 
     def test_reasoning_not_reused_across_user_turn(self):
         """Previous assistant reasoning should not leak into a fresh user-triggered turn."""
@@ -534,8 +539,8 @@ class TestMultiTurnReasoningContent:
         assert assistant_msgs[0]["reasoning_content"] == "old reasoning"
         assert "reasoning_content" not in assistant_msgs[1]
 
-    def test_tool_continuation_does_not_reuse_reasoning_when_thinking_disabled(self):
-        """Reasoning carry-forward should only happen when this request actually uses thinking."""
+    def test_open_tool_call_pruned_when_thinking_disabled(self):
+        """Open tool-call pruning applies regardless of thinking mode."""
         body = {
             "model": "deepseek-v4-flash",
             "input": [
@@ -552,7 +557,8 @@ class TestMultiTurnReasoningContent:
         assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
         assert result["thinking"]["type"] == "disabled"
         assert assistant_msgs[0]["reasoning_content"] == "old reasoning"
-        assert "reasoning_content" not in assistant_msgs[1]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_001"
 
 
 class TestConsecutiveAssistantMerge:
@@ -601,6 +607,26 @@ class TestConsecutiveAssistantMerge:
         assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
         assert len(assistant_msgs) == 1
         assert len(assistant_msgs[0]["tool_calls"]) == 3
+
+    def test_parallel_tool_call_with_missing_output_is_pruned(self):
+        """Only tool calls with matching tool outputs should remain in history."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Read both files"},
+                {"type": "function_call", "call_id": "call_001", "name": "read_file", "arguments": '{"path":"a.py"}'},
+                {"type": "function_call", "call_id": "call_002", "name": "read_file", "arguments": '{"path":"b.py"}'},
+                {"type": "function_call_output", "call_id": "call_001", "output": "content a"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        tool_msgs = [m for m in result["messages"] if m["role"] == "tool"]
+        assert len(assistant_msgs) == 1
+        assert [tc["id"] for tc in assistant_msgs[0]["tool_calls"]] == ["call_001"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call_001"]
 
     def test_assistant_text_plus_tool_call_merged(self):
         """Assistant text message followed by function_call should merge."""
@@ -653,6 +679,34 @@ class TestConsecutiveAssistantMerge:
                 assert msgs[i - 1]["role"] != "assistant", (
                     f"Consecutive assistant messages at [{i-1}] and [{i}]"
                 )
+
+    def test_every_tool_call_has_immediate_tool_output(self):
+        """Translated history should satisfy Chat Completions tool-call ordering."""
+        body = {
+            "model": "deepseek-v4-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": "Complex task"},
+                {"type": "function_call", "call_id": "c1", "name": "t1", "arguments": "{}"},
+                {"type": "function_call", "call_id": "c2", "name": "t2", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "r1"},
+                {"type": "message", "role": "user", "content": "Continue"},
+                {"type": "function_call_output", "call_id": "orphan", "output": "late"},
+                {"type": "function_call", "call_id": "c3", "name": "t3", "arguments": "{}"},
+            ],
+        }
+        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
+        result = responses_request_to_chat(body, model_config=config)
+
+        msgs = result["messages"]
+        for index, msg in enumerate(msgs):
+            if not msg.get("tool_calls"):
+                continue
+            expected_ids = [tc["id"] for tc in msg["tool_calls"]]
+            following_ids = [
+                following.get("tool_call_id")
+                for following in msgs[index + 1:index + 1 + len(expected_ids)]
+            ]
+            assert following_ids == expected_ids
 
 
 class TestLiteLLMResponseHelpers:
