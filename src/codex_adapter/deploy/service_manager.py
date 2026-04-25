@@ -156,19 +156,7 @@ def start(
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = LOG_DIR / f"codex-adapter-{datetime.now():%Y%m%d}.log"
 
-    # Find uv binary
-    uv_bin = _find_uv()
-    if uv_bin is None:
-        raise RuntimeError(
-            "Cannot find 'uv'. Run 'codex-adapter deploy' or install uv manually."
-        )
-
-    # Build command
-    cmd = [
-        str(uv_bin), "run", "codex-adapter", "start",
-        "--preset", preset,
-        "--port", str(port),
-    ]
+    cmd = _build_start_command(preset, port)
 
     console.print(f"[blue]Starting codex-adapter (preset={preset}, port={port}) ...[/]")
 
@@ -333,6 +321,20 @@ def _find_uv() -> Path | None:
             return p
 
     return None
+
+
+def _build_start_command(preset: str, port: int) -> list[str]:
+    """Build the background service command in the current Python environment."""
+    return [
+        sys.executable,
+        "-m",
+        "codex_adapter.cli",
+        "start",
+        "--preset",
+        preset,
+        "--port",
+        str(port),
+    ]
 
 
 def _find_latest_log() -> Path | None:
