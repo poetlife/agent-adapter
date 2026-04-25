@@ -48,3 +48,9 @@
 | `configure_all()` / `write_env_file()` / `write_codex_config_file()` | `codex_adapter.deploy.configurator` | 一键部署配置 | cli |
 | `install_all()` / `service_manager.*` / `systemd.*` | `codex_adapter.deploy.*` | 安装依赖与后台服务管理 | cli |
 
+## 📦 发布与安装
+
+| 入口 | 所属模块 | 解决的问题 | 被谁使用 |
+|---|---|---|---|
+| `project.version` | `pyproject.toml` | Python 包版本与 release tag 的唯一版本来源 | release workflow, docs |
+

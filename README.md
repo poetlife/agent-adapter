@@ -27,11 +27,38 @@ POST /v1/responses    →      接收 Responses API 请求
 - function tool calls 双向映射
 - SSE 流式事件格式完整转换（含 reasoning_content 流式翻译）
 
-## 快速开始
+## 安装
+
+### 直接安装已发布版本
+
+每次推送 `vX.Y.Z` tag 后，GitHub Actions 都会自动运行测试、构建 `wheel` / `sdist`，并把产物挂到对应的 GitHub Release。
+
+如果你只是想直接使用 `codex-adapter`，不需要克隆仓库，直接从 Release 安装即可：
+
+```bash
+# 推荐：安装成独立命令行工具
+uv tool install --from "https://github.com/poetlife/agent-adapter/releases/download/vX.Y.Z/codex_adapter-X.Y.Z-py3-none-any.whl" codex-adapter
+
+# 或者使用 pipx
+pipx install "https://github.com/poetlife/agent-adapter/releases/download/vX.Y.Z/codex_adapter-X.Y.Z-py3-none-any.whl"
+
+# 查看版本
+codex-adapter --version
+```
+
+如果你已经在自己的 Python 环境里，也可以直接：
+
+```bash
+pip install "https://github.com/poetlife/agent-adapter/releases/download/vX.Y.Z/codex_adapter-X.Y.Z-py3-none-any.whl"
+```
+
+### 从源码运行
+
+适合开发、调试或需要修改代码的场景。
 
 ```bash
 # 1. 克隆并安装
-git clone <repo-url> && cd agent-adapter
+git clone https://github.com/poetlife/agent-adapter.git && cd agent-adapter
 uv sync
 
 # 2. 设置 API Key
@@ -72,7 +99,7 @@ uv run codex-adapter list
 
 ```bash
 uv run codex-adapter setup --preset deepseek
-uv run codex-adapter setup --preset deepseek --write-config  # 自动写入 config.toml
+uv run codex-adapter setup --preset deepseek --show-only      # 只显示指引，不写文件
 ```
 
 ## 支持的模型
@@ -144,6 +171,30 @@ uv run pytest -v
 # 运行单个测试文件
 uv run pytest tests/test_translator.py -v
 ```
+
+## 发布
+
+发布以 `pyproject.toml` 里的版本号为准。推荐流程：
+
+```bash
+# 1. 更新 pyproject.toml 中的 version
+# 2. 提交代码
+git push origin main
+
+# 3. 打版本 tag 并推送
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+推送 tag 后，`Release` workflow 会自动：
+
+- 校验 tag 和包版本一致
+- 运行完整测试
+- 构建 `wheel` 和 `sdist`
+- 用构建出来的 `wheel` 做一次直接安装冒烟验证
+- 创建 GitHub Release 并上传 `dist/*`
+
+详细说明见 [`docs/release.md`](docs/release.md)。
 
 ## 工作原理
 
