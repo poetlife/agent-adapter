@@ -1,5 +1,7 @@
 """Tests for config module."""
 
+import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,11 @@ SAMPLE_PRESET_DATA = {
         },
     ],
 }
+
+
+def test_installed_package_version_matches_project_metadata():
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert version("codex-adapter") == pyproject["project"]["version"]
 
 
 class TestPreset:
