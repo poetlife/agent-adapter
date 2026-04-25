@@ -220,13 +220,18 @@ def setup(preset: str, api_key: str | None, port: int, show_only: bool) -> None:
     console.print("[bold green]Setup complete![/]")
     console.print()
     console.print("[bold]What was configured:[/]")
-    for label, p in [
+    for label, value in [
         ("Environment file", paths.get("env_file")),
         ("Codex CLI config", paths.get("codex_config")),
-        ("Shell profile", paths.get("shell_profile")),
+        ("Shell profiles", paths.get("shell_profiles")),
     ]:
-        if p:
-            console.print(f"  [green]✓[/] {label}: [dim]{p}[/]")
+        if isinstance(value, list):
+            if value:
+                console.print(f"  [green]✓[/] {label}: [dim]{', '.join(str(p) for p in value)}[/]")
+            else:
+                console.print(f"  [yellow]-[/] {label}: skipped")
+        elif value:
+            console.print(f"  [green]✓[/] {label}: [dim]{value}[/]")
         else:
             console.print(f"  [yellow]-[/] {label}: skipped")
 

@@ -155,39 +155,25 @@ def write_codex_config_file(
 # Shell profile injection
 # ---------------------------------------------------------------------------
 
-def _find_shell_profile() -> Path | None:
-    """Find the user's shell profile file."""
-    candidates = [
-        Path.home() / ".zshrc",
-        Path.home() / ".bashrc",
-        Path.home() / ".profile",
+def _target_shell_profiles(home: Path | None = None) -> list[Path]:
+    """Return shell profiles setup should keep in sync."""
+    home = home or Path.home()
+    return [
+        home / ".bashrc",
+        home / ".zshrc",
     ]
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
 
 
-def inject_shell_profile(env_file_path: Path | None = None) -> Path | None:
-    """Add source line for the env file into the user's shell profile.
+def inject_shell_profiles(
+    env_file_path: Path | None = None,
+    home: Path | None = None,
+) -> list[Path]:
+    """Add source line for the env file into bash and zsh profiles.
 
-    Returns the profile path if injected, None if skipped.
+    Returns profile paths that are configured after the call.
     """
     env_file_path = env_file_path or ENV_FILE
-    profile = _find_shell_profile()
-
-    if profile is None:
-        console.print(
-            "[yellow]No shell profile found.[/] "
-            f"Manually add: [cyan]source {env_file_path}[/]"
-        )
-        return None
-
-    # Check if already injected
-    content = profile.read_text()
-    if SHELL_MARKER_BEGIN in content:
-        console.print(f"[green]Shell profile already configured:[/] {profile}")
-        return profile
+    configured: list[Path] = []
 
     snippet = f"""
 {SHELL_MARKER_BEGIN}
@@ -199,12 +185,20 @@ if [ -f "{env_file_path}" ]; then
 fi
 {SHELL_MARKER_END}
 """
-    with open(profile, "a") as f:
-        f.write(snippet)
 
-    console.print(f"[green]Injected into:[/] {profile}")
-    console.print(f"[dim]Run 'source {profile}' or re-login to activate[/]")
-    return profile
+    for profile in _target_shell_profiles(home):
+        content = profile.read_text() if profile.exists() else ""
+        if SHELL_MARKER_BEGIN in content:
+            console.print(f"[green]Shell profile already configured:[/] {profile}")
+        else:
+            profile.parent.mkdir(parents=True, exist_ok=True)
+            with open(profile, "a") as f:
+                f.write(snippet)
+            console.print(f"[green]Injected into:[/] {profile}")
+        configured.append(profile)
+
+    console.print("[dim]Open a new terminal, or source the updated profile to activate[/]")
+    return configured
 
 
 # ---------------------------------------------------------------------------
@@ -307,11 +301,12 @@ def configure_all(
     # Write model catalog JSON (so Codex TUI recognizes our models)
     write_model_catalog(preset_obj.models)
 
-    # Inject shell profile
-    profile_path = inject_shell_profile(env_path)
+    # Inject shell profiles
+    profile_paths = inject_shell_profiles(env_path)
 
     return {
         "env_file": env_path,
         "codex_config": codex_path,
-        "shell_profile": profile_path,
+        "shell_profile": profile_paths[0] if profile_paths else None,
+        "shell_profiles": profile_paths,
     }
