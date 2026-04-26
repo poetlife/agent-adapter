@@ -31,27 +31,27 @@ git push origin main --tags
 
 如果 workflow 成功，Release 页面会出现两个可下载产物：
 
-- `codex_adapter-0.1.3-py3-none-any.whl`
-- `codex_adapter-0.1.3.tar.gz`
+- `codex_adapter-0.1.4-py3-none-any.whl`
+- `codex_adapter-0.1.4.tar.gz`
 
 ## 用户安装方式
 
 推荐直接安装 Release 里的 `wheel`：
 
 ```bash
-uv tool install --from "https://github.com/poetlife/agent-adapter/releases/download/v0.1.3/codex_adapter-0.1.3-py3-none-any.whl" codex-adapter
+uv tool install --from "https://github.com/poetlife/agent-adapter/releases/download/v0.1.4/codex_adapter-0.1.4-py3-none-any.whl" codex-adapter
 ```
 
 或者：
 
 ```bash
-pipx install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.3/codex_adapter-0.1.3-py3-none-any.whl"
+pipx install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.4/codex_adapter-0.1.4-py3-none-any.whl"
 ```
 
 已有 Python 环境时，也可以：
 
 ```bash
-pip install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.3/codex_adapter-0.1.3-py3-none-any.whl"
+pip install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.4/codex_adapter-0.1.4-py3-none-any.whl"
 ```
 
 ## 常见失败原因
