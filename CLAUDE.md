@@ -32,6 +32,10 @@ uv run codex-adapter setup -p deepseek -k sk-xxx
 uv run codex-adapter service start
 uv run codex-adapter service status
 uv run codex-adapter service stop
+
+# Bump version (updates pyproject.toml, README.md, docs/release.md, commits & tags)
+python scripts/bump_version.py <new-version>
+python scripts/bump_version.py <new-version> --dry-run  # preview changes
 ```
 
 ## Architecture
