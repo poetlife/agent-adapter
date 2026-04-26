@@ -145,9 +145,15 @@ def main(argv: list[str] | None = None) -> int:
         path.write_text(new, encoding="utf-8")
         print(f"  Updated {path.relative_to(_REPO_ROOT)}")
 
-    # 4. Git commit + tag.
+    # 4. Refresh uv.lock so CI's `uv sync --locked` passes.
+    print("  Running uv lock ...")
+    subprocess.run(["uv", "lock"], cwd=_REPO_ROOT, check=True)
+    print("  Updated uv.lock")
+
+    # 5. Git commit + tag.
     if not args.no_git:
         files_to_add = [str(p.relative_to(_REPO_ROOT)) for p, _, _ in changes]
+        files_to_add.append("uv.lock")
         subprocess.run(
             ["git", "add", *files_to_add],
             cwd=_REPO_ROOT,

@@ -37,10 +37,10 @@ POST /v1/responses    →      接收 Responses API 请求
 
 ```bash
 # 推荐：安装成独立命令行工具
-uv tool install --from "https://github.com/poetlife/agent-adapter/releases/download/v0.1.4/codex_adapter-0.1.4-py3-none-any.whl" codex-adapter
+uv tool install --from "https://github.com/poetlife/agent-adapter/releases/download/v0.1.3/codex_adapter-0.1.3-py3-none-any.whl" codex-adapter
 
 # 或者使用 pipx
-pipx install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.4/codex_adapter-0.1.4-py3-none-any.whl"
+pipx install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.3/codex_adapter-0.1.3-py3-none-any.whl"
 
 # 查看版本
 codex-adapter --version
@@ -49,7 +49,7 @@ codex-adapter --version
 如果你已经在自己的 Python 环境里，也可以直接：
 
 ```bash
-pip install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.4/codex_adapter-0.1.4-py3-none-any.whl"
+pip install "https://github.com/poetlife/agent-adapter/releases/download/v0.1.3/codex_adapter-0.1.3-py3-none-any.whl"
 ```
 
 ### 从源码运行
