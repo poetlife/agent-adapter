@@ -92,10 +92,6 @@ def responses_request_to_chat(
     elif isinstance(raw_input, list):
         messages.extend(_convert_input_items(raw_input, thinking_enabled=thinking_enabled))
 
-    if thinking_enabled and _has_assistant_tool_calls_without_reasoning(messages):
-        thinking_enabled = False
-        messages = _strip_reasoning_content(messages)
-
     chat_body: dict[str, Any] = {
         "model": body.get("model", ""),
         "messages": messages,
@@ -143,26 +139,6 @@ def responses_request_to_chat(
         chat_body["tool_choice"] = body["tool_choice"]
 
     return chat_body
-
-
-def _has_assistant_tool_calls_without_reasoning(messages: list[dict[str, Any]]) -> bool:
-    """Return true when thinking history cannot satisfy DeepSeek requirements."""
-    return any(
-        msg.get("role") == "assistant"
-        and msg.get("tool_calls")
-        and not msg.get("reasoning_content")
-        for msg in messages
-    )
-
-
-def _strip_reasoning_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove DeepSeek thinking-only fields when a request falls back to chat mode."""
-    stripped: list[dict[str, Any]] = []
-    for msg in messages:
-        new_msg = dict(msg)
-        new_msg.pop("reasoning_content", None)
-        stripped.append(new_msg)
-    return stripped
 
 
 def _convert_input_items(

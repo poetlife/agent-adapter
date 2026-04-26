@@ -560,28 +560,6 @@ class TestMultiTurnReasoningContent:
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_001"
 
-    def test_thinking_disabled_when_tool_history_lacks_reasoning_content(self):
-        """DeepSeek rejects thinking mode if historical tool calls lack reasoning_content."""
-        body = {
-            "model": "deepseek-v4-flash",
-            "input": [
-                {"type": "message", "role": "user", "content": "Analyze this repo"},
-                {"type": "function_call", "call_id": "call_001", "name": "exec_command", "arguments": '{"cmd":"ls"}'},
-                {"type": "function_call", "call_id": "call_002", "name": "exec_command", "arguments": '{"cmd":"pwd"}'},
-                {"type": "function_call_output", "call_id": "call_001", "output": "bwrap failed"},
-                {"type": "function_call_output", "call_id": "call_002", "output": "bwrap failed"},
-            ],
-        }
-        config = ModelConfig(supports_thinking=True, default_thinking="enabled")
-        result = responses_request_to_chat(body, model_config=config)
-
-        assert result["thinking"]["type"] == "disabled"
-        assert "reasoning_effort" not in result
-        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
-        assert len(assistant_msgs) == 1
-        assert "reasoning_content" not in assistant_msgs[0]
-        assert len(assistant_msgs[0]["tool_calls"]) == 2
-
 
 class TestConsecutiveAssistantMerge:
     """Test merging of consecutive assistant messages (parallel tool calls)."""

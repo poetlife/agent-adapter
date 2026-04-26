@@ -18,9 +18,6 @@ from typing import Any, AsyncIterator
 
 from litellm import acompletion
 from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
-from litellm.responses.litellm_completion_transformation.streaming_iterator import (
-    LiteLLMCompletionStreamingIterator,
-)
 from litellm.responses.litellm_completion_transformation.transformation import (
     LiteLLMCompletionResponsesConfig,
 )
@@ -183,53 +180,12 @@ async def stream_chat_as_responses_sse(
 ) -> AsyncIterator[bytes]:
     """Translate a LiteLLM chat completion stream into Responses API SSE bytes.
 
-    Wraps the ``CustomStreamWrapper`` from ``acompletion(stream=True)`` in
-    LiteLLM's ``LiteLLMCompletionStreamingIterator``, which produces typed
-    Responses API events.  Each event is serialized to SSE format for
-    ``Starlette.StreamingResponse``.
+    The local translator preserves DeepSeek ``reasoning_content`` in final
+    Responses history when a thinking-mode turn calls tools.  DeepSeek requires
+    that reasoning to be passed back with the historical assistant tool call.
     """
-    if not isinstance(chat_stream, CustomStreamWrapper):
-        # Fallback: raw async iterator — wrap manually.
-        async for chunk in _fallback_stream_translation(chat_stream, original_model):
-            yield chunk
-        return
-
-    iterator = LiteLLMCompletionStreamingIterator(
-        model=original_model,
-        litellm_custom_stream_wrapper=chat_stream,
-        request_input="",
-        responses_api_request={},
-    )
-
-    async for event in iterator:
-        event_dict = (
-            event.model_dump(exclude_none=True, mode="json")
-            if hasattr(event, "model_dump")
-            else dict(event)
-        )
-
-        event_type = event_dict.get("type", "unknown")
-
-        # Fix reasoning format throughout the stream.
-        if event_type in (
-            "response.output_item.added",
-            "response.output_item.done",
-        ):
-            item = event_dict.get("item", {})
-            if item.get("type") == "reasoning":
-                event_dict["item"] = _fix_single_reasoning_item(item)
-
-        # Patch the completed event.
-        if event_type == "response.completed" and "response" in event_dict:
-            resp = event_dict["response"]
-            resp["object"] = "response"
-            resp["output"] = _fix_reasoning_format(resp.get("output", []))
-            resp["output_text"] = _compute_output_text(resp.get("output", []))
-            for key in ("parallel_tool_calls", "tool_choice", "tools", "text",
-                        "temperature", "top_p", "max_output_tokens", "truncation"):
-                resp.pop(key, None)
-
-        yield _sse_event(event_type, event_dict)
+    async for chunk in _translate_stream_preserving_reasoning(chat_stream, original_model):
+        yield chunk
 
 
 # ---------------------------------------------------------------------------
@@ -368,5 +324,164 @@ async def _fallback_stream_translation(
             "created_at": int(_time.time()), "model": original_model,
             "output": final_output, "output_text": accumulated_text,
             "status": "completed", "usage": {},
+        },
+    })
+
+
+async def _translate_stream_preserving_reasoning(
+    stream: Any,
+    original_model: str,
+) -> AsyncIterator[bytes]:
+    """Translate chat stream chunks while preserving reasoning before tool calls."""
+    import time as _time
+
+    resp_id = f"resp_{uuid.uuid4().hex[:24]}"
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    reasoning_id = f"rs_{uuid.uuid4().hex[:24]}"
+    model = original_model
+    usage: dict[str, Any] = {}
+    accumulated_text = ""
+    accumulated_reasoning = ""
+    accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+    created_emitted = False
+    reasoning_added = False
+    text_added = False
+
+    async for raw_chunk in stream:
+        chunk_data = _to_serializable_object(raw_chunk)
+        if not isinstance(chunk_data, dict):
+            continue
+
+        if "model" in chunk_data:
+            model = chunk_data["model"]
+        if chunk_data.get("usage"):
+            raw_usage = chunk_data["usage"]
+            usage = {
+                "input_tokens": raw_usage.get("prompt_tokens", 0),
+                "output_tokens": raw_usage.get("completion_tokens", 0),
+                "total_tokens": raw_usage.get("total_tokens", 0),
+            }
+
+        if not created_emitted:
+            created_emitted = True
+            yield _sse_event("response.created", {
+                "type": "response.created",
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "in_progress",
+                    "model": model,
+                    "output": [],
+                },
+            })
+
+        for choice in chunk_data.get("choices", []):
+            delta = choice.get("delta", {})
+            reasoning_delta = delta.get("reasoning_content")
+            if reasoning_delta:
+                if not reasoning_added:
+                    reasoning_added = True
+                    yield _sse_event("response.output_item.added", {
+                        "type": "response.output_item.added",
+                        "item": {"type": "reasoning", "id": reasoning_id, "summary": []},
+                    })
+                accumulated_reasoning += reasoning_delta
+                yield _sse_event("response.reasoning_summary_text.delta", {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": reasoning_id,
+                    "summary_index": 0,
+                    "delta": reasoning_delta,
+                })
+
+            text_delta = delta.get("content")
+            if text_delta:
+                if not text_added:
+                    text_added = True
+                    yield _sse_event("response.output_item.added", {
+                        "type": "response.output_item.added",
+                        "item": {
+                            "type": "message",
+                            "id": msg_id,
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    })
+                    yield _sse_event("response.content_part.added", {
+                        "type": "response.content_part.added",
+                        "item_id": msg_id,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": ""},
+                    })
+                accumulated_text += text_delta
+                yield _sse_event("response.output_text.delta", {
+                    "type": "response.output_text.delta",
+                    "item_id": msg_id,
+                    "content_index": 0,
+                    "delta": text_delta,
+                })
+
+            for tool_delta in delta.get("tool_calls", []) or []:
+                index = tool_delta.get("index", 0)
+                tool_call = accumulated_tool_calls.setdefault(
+                    index,
+                    {"id": "", "name": "", "arguments": ""},
+                )
+                if tool_delta.get("id"):
+                    tool_call["id"] = tool_delta["id"]
+                function_delta = tool_delta.get("function", {})
+                if function_delta.get("name"):
+                    tool_call["name"] += function_delta["name"]
+                if function_delta.get("arguments"):
+                    tool_call["arguments"] += function_delta["arguments"]
+
+    final_output: list[dict[str, Any]] = []
+    if accumulated_reasoning:
+        final_output.append({
+            "type": "reasoning",
+            "id": reasoning_id,
+            "summary": [{"type": "summary_text", "text": accumulated_reasoning}],
+        })
+    if accumulated_text:
+        final_output.append({
+            "type": "message",
+            "id": msg_id,
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": accumulated_text}],
+        })
+    for tool_call in (
+        accumulated_tool_calls[index]
+        for index in sorted(accumulated_tool_calls)
+        if accumulated_tool_calls[index].get("id")
+    ):
+        final_output.append({
+            "type": "function_call",
+            "id": tool_call["id"],
+            "call_id": tool_call["id"],
+            "name": tool_call.get("name", ""),
+            "arguments": tool_call.get("arguments", ""),
+        })
+
+    if not created_emitted:
+        yield _sse_event("response.created", {
+            "type": "response.created",
+            "response": {
+                "id": resp_id,
+                "object": "response",
+                "status": "in_progress",
+                "model": model,
+                "output": [],
+            },
+        })
+    yield _sse_event("response.completed", {
+        "type": "response.completed",
+        "response": {
+            "id": resp_id,
+            "object": "response",
+            "created_at": int(_time.time()),
+            "model": model,
+            "output": final_output,
+            "output_text": accumulated_text,
+            "status": "completed",
+            "usage": usage,
         },
     })

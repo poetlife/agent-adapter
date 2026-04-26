@@ -11,6 +11,7 @@ from providers.litellm_client import (
     request_chat_completion,
     serialize_completion_response,
     serialize_completion_stream,
+    stream_chat_as_responses_sse,
 )
 
 
@@ -110,6 +111,64 @@ async def test_serialize_completion_stream_formats_sse():
 
     assert chunks[0] == 'data: {"id": "chunk-1", "choices": [{"delta": {"content": "Hi"}}]}\n\n'
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_as_responses_preserves_reasoning_before_tool_calls():
+    stream = FakeStream([
+        FakeModelDump({
+            "id": "chunk-1",
+            "model": "deepseek-v4-flash",
+            "choices": [{"delta": {"reasoning_content": "Need commands. "}}],
+        }),
+        FakeModelDump({
+            "id": "chunk-2",
+            "model": "deepseek-v4-flash",
+            "choices": [{"delta": {"reasoning_content": "Run both."}}],
+        }),
+        FakeModelDump({
+            "id": "chunk-3",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_001",
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": '{"cmd":"ls"}'},
+                    }]
+                }
+            }],
+        }),
+        FakeModelDump({
+            "id": "chunk-4",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 1,
+                        "id": "call_002",
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": '{"cmd":"pwd"}'},
+                    }]
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }),
+    ])
+
+    events = []
+    async for chunk in stream_chat_as_responses_sse(stream, "deepseek-v4-flash"):
+        text = chunk.decode("utf-8")
+        if text.startswith("event: response.completed"):
+            import json
+            events.append(json.loads(text.split("data: ", 1)[1]))
+
+    output = events[0]["response"]["output"]
+    assert [item["type"] for item in output] == ["reasoning", "function_call", "function_call"]
+    assert output[0]["summary"][0]["text"] == "Need commands. Run both."
+    assert [item["call_id"] for item in output[1:]] == ["call_001", "call_002"]
 
 
 def test_error_helpers():
